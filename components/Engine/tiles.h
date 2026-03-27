@@ -40,10 +40,15 @@ typedef struct tile_s{
     dimensions_t dim;
     uint8_t lock;
     int32_t animFlags;
-    uint8_t* data;
+    /* data pointer removed — use waloff[tilenume] instead to keep tile_t at
+       12 bytes so MAXTILES*12 = 110,592 bytes fits in the 122KB PSRAM heap. */
 } tile_t;
 
 extern tile_t *tiles;//[MAXTILES];
+
+/* Separate per-tile texture data pointers (replaces tile_t::data).
+   Placed in DRAM/PSRAM depending on linker; accessed by waloff[tilenume]. */
+extern EXT_RAM_ATTR uint8_t* waloff[MAXTILES];
 
 
 void setviewtotile(short tilenume, int32_t tileWidth, int32_t tileHeight);

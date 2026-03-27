@@ -1,4 +1,5 @@
 #include "SDL_system.h"
+#include <pthread.h>
 
 struct SDL_mutex
 {
@@ -40,41 +41,10 @@ void SDL_Quit(void)
 
 void SDL_InitSD(void)
 {
-    printf("Initialising SD Card\n");
-#if 1
-	sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-    host.command_timeout_ms = 3000;
-    host.max_freq_khz = SDMMC_FREQ_DEFAULT;
-    // https://docs.espressif.com/projects/esp-idf/en/latest/api-reference/peripherals/spi_master.html
-    host.slot = /*CONFIG_HW_SD_PIN_NUM_MISO == 19 ? VSPI_HOST :*/ HSPI_HOST;
-    sdspi_slot_config_t slot_config = SDSPI_SLOT_CONFIG_DEFAULT();
-    slot_config.gpio_miso = CONFIG_HW_SD_PIN_NUM_MISO;
-    slot_config.gpio_mosi = CONFIG_HW_SD_PIN_NUM_MOSI;
-    slot_config.gpio_sck  = CONFIG_HW_SD_PIN_NUM_CLK;
-    slot_config.gpio_cs   = CONFIG_HW_SD_PIN_NUM_CS;
-	slot_config.dma_channel = 1; //2
-
-#else
-	sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-	host.flags = SDMMC_HOST_FLAG_1BIT;
-	//host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
-	host.command_timeout_ms=1500;
-	sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
-	slot_config.width = 1;
-#endif
-    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-        .format_if_mount_failed = false,
-        .max_files = 5
-    };
-
-	sdmmc_card_t* card;
-    SDL_LockDisplay();
-    ESP_ERROR_CHECK(esp_vfs_fat_sdmmc_mount("/sd", &host, &slot_config, &mount_config, &card));
-    SDL_UnlockDisplay();
-
-    printf("Init_SD: SD card opened.\n");
-    
-	//sdmmc_card_print_info(stdout, card);    
+    /* SD card is mounted by ESPHome's sd_card component before the engine starts.
+     * This function is intentionally a no-op in the ESP32-S3 HUB75 build.
+     * (Original IDF 4 ODROID-GO SPI SD init removed — uses HSPI_HOST and
+     *  sdspi_slot_config_t APIs that no longer exist in IDF 5.) */
 }
 
 const SDL_version* SDL_Linked_Version()
@@ -112,7 +82,7 @@ SDL_mutex* SDL_CreateMutex(void)
 
 int SDL_LockMutex(SDL_mutex* mutex)
 {
-    xSemaphoreTake(mutex->handle, 1000 / portTICK_RATE_MS);
+    xSemaphoreTake(mutex->handle, 1000 / portTICK_PERIOD_MS);
     return 0;
 }
 

@@ -9,10 +9,14 @@
 #include "platform.h"
 #include "build.h"
 #include "draw.h"
+#include "esp_attr.h"
 
 int32_t pixelsAllowed = 10000000000;
 
-uint8_t  *transluc = NULL;
+/* 65536-byte translucency lookup table — placed in static PSRAM BSS to avoid
+   heap fragmentation (kkmalloc/allocache would fail with only ~41KB PSRAM free). */
+EXT_RAM_BSS_ATTR static uint8_t transluc_storage[65536];
+uint8_t  *transluc = transluc_storage;
 
 static int transrev = 0;
 

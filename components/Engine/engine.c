@@ -44,7 +44,7 @@ uint8_t  oa1, o3c2, ortca, ortcb, overtbits, laststereoint;
 #define MAXTILEFILES 256
 #define MAXYSAVES ((MAXXDIM*MAXSPRITES)>>7)
 #define MAXNODESPERLINE 42   /* Warning: This depends on MAXYSAVES & MAXYDIM! */
-#define MAXWALLSB 2048
+#define MAXWALLSB 1024  // reduced from 2048; saves ~66KB PSRAM BSS on 2MB device
 #define MAXCLIPDIST 1024
 
 /* used to be static. --ryan. */
@@ -746,7 +746,7 @@ static void ceilscan (int32_t x1, int32_t x2, int32_t sectnum)
 
     TILE_MakeAvailable(globalpicnum);
     
-    globalbufplc = tiles[globalpicnum].data;
+    globalbufplc = waloff[globalpicnum];
 
     globalshade = (int32_t)sec->ceilingshade;
     globvis = globalcisibility;
@@ -985,7 +985,7 @@ static void florscan (int32_t x1, int32_t x2, int32_t sectnum)
     TILE_MakeAvailable(globalpicnum);
     
     //Check where is the texture in RAM
-    globalbufplc = tiles[globalpicnum].data;
+    globalbufplc = waloff[globalpicnum];
 
     //Retrieve the shade of the sector (illumination level).
     globalshade = (int32_t)sec->floorshade;
@@ -1296,7 +1296,7 @@ IRAM_ATTR static void wallscan(int32_t x1, int32_t x2,
         vince[0] = swal[x]*globalyscale;
         vplce[0] = globalzd + vince[0]*(y1ve[0]-globalhoriz+1);
 
-        vlineasm1(vince[0],palookupoffse[0],y2ve[0]-y1ve[0]-1,vplce[0],bufplce[0]+tiles[globalpicnum].data,x+frameoffset+ylookup[y1ve[0]]);
+        vlineasm1(vince[0],palookupoffse[0],y2ve[0]-y1ve[0]-1,vplce[0],bufplce[0]+waloff[globalpicnum],x+frameoffset+ylookup[y1ve[0]]);
     }
     
     for(; x<=x2-3; x+=4)
@@ -1322,7 +1322,7 @@ IRAM_ATTR static void wallscan(int32_t x1, int32_t x2,
                 i *= tsizy;
             else
                 i <<= tsizy;
-            bufplce[z] = tiles[globalpicnum].data+i;
+            bufplce[z] = waloff[globalpicnum]+i;
 
             vince[z] = swal[x+z]*globalyscale;
             vplce[z] = globalzd + vince[z]*(y1ve[z]-globalhoriz+1);
@@ -1409,7 +1409,7 @@ IRAM_ATTR static void wallscan(int32_t x1, int32_t x2,
         vince[0] = swal[x]*globalyscale;
         vplce[0] = globalzd + vince[0]*(y1ve[0]-globalhoriz+1);
 
-        vlineasm1(vince[0],palookupoffse[0],y2ve[0]-y1ve[0]-1,vplce[0],bufplce[0]+tiles[globalpicnum].data,x+frameoffset+ylookup[y1ve[0]]);
+        vlineasm1(vince[0],palookupoffse[0],y2ve[0]-y1ve[0]-1,vplce[0],bufplce[0]+waloff[globalpicnum],x+frameoffset+ylookup[y1ve[0]]);
     }
     faketimerhandler();
 }
@@ -1480,7 +1480,7 @@ IRAM_ATTR static void maskwallscan(int32_t x1, int32_t x2,
         vince[0] = swal[x]*globalyscale;
         vplce[0] = globalzd + vince[0]*(y1ve[0]-globalhoriz+1);
 
-        mvlineasm1(vince[0],palookupoffse[0],y2ve[0]-y1ve[0]-1,vplce[0],bufplce[0]+tiles[globalpicnum].data,p+ylookup[y1ve[0]]);
+        mvlineasm1(vince[0],palookupoffse[0],y2ve[0]-y1ve[0]-1,vplce[0],bufplce[0]+waloff[globalpicnum],p+ylookup[y1ve[0]]);
     }
     for(; x<=x2-3; x+=4,p+=4)
     {
@@ -1505,7 +1505,7 @@ IRAM_ATTR static void maskwallscan(int32_t x1, int32_t x2,
             else
                 i <<= tileHeight;
             
-            bufplce[z] = tiles[globalpicnum].data+i;
+            bufplce[z] = waloff[globalpicnum]+i;
 
             vince[z] = swal[dax]*globalyscale;
             vplce[z] = globalzd + vince[z]*(y1ve[z]-globalhoriz+1);
@@ -1572,7 +1572,7 @@ IRAM_ATTR static void maskwallscan(int32_t x1, int32_t x2,
         vince[0] = swal[x]*globalyscale;
         vplce[0] = globalzd + vince[0]*(y1ve[0]-globalhoriz+1);
 
-        mvlineasm1(vince[0],palookupoffse[0],y2ve[0]-y1ve[0]-1,vplce[0],bufplce[0]+tiles[globalpicnum].data,p+ylookup[y1ve[0]]);
+        mvlineasm1(vince[0],palookupoffse[0],y2ve[0]-y1ve[0]-1,vplce[0],bufplce[0]+waloff[globalpicnum],p+ylookup[y1ve[0]]);
     }
     faketimerhandler();
 }
@@ -1869,7 +1869,7 @@ static void grouscan (int32_t dax1, int32_t dax2, int32_t sectnum, uint8_t  dast
     globvis = mulscale16(globvis,xdimscale);
     j =(int32_t) FP_OFF(palookup[globalpal]);
 
-    setupslopevlin(((int32_t)(picsiz[globalpicnum]&15))+(((int32_t)(picsiz[globalpicnum]>>4))<<8),tiles[globalpicnum].data,-ylookup[1]);
+    setupslopevlin(((int32_t)(picsiz[globalpicnum]&15))+(((int32_t)(picsiz[globalpicnum]>>4))<<8),waloff[globalpicnum],-ylookup[1]);
 
     l = (globalzd>>16);
 
@@ -3073,7 +3073,7 @@ IRAM_ATTR static void transmaskvline(int32_t x)
     if (i >= tiles[globalpicnum].dim.width)
         i %= tiles[globalpicnum].dim.width;
     
-    bufplc = tiles[globalpicnum].data+i*tiles[globalpicnum].dim.height;
+    bufplc = waloff[globalpicnum]+i*tiles[globalpicnum].dim.height;
 
     p = ylookup[y1v]+x+frameoffset;
 
@@ -3122,12 +3122,12 @@ IRAM_ATTR static void transmaskvline2 (int32_t x)
     i = lwall[x] + globalxpanning;
     if (i >= tiles[globalpicnum].dim.width)
         i %= tiles[globalpicnum].dim.width;
-    bufplce[0] = tiles[globalpicnum].data+i*tiles[globalpicnum].dim.height;
+    bufplce[0] = waloff[globalpicnum]+i*tiles[globalpicnum].dim.height;
 
     i = lwall[x2] + globalxpanning;
     if (i >= tiles[globalpicnum].dim.width)
         i %= tiles[globalpicnum].dim.width;
-    bufplce[1] = tiles[globalpicnum].data+i*tiles[globalpicnum].dim.height;
+    bufplce[1] = waloff[globalpicnum]+i*tiles[globalpicnum].dim.height;
 
     
     y1 = max(y1ve[0],y1ve[1]);
@@ -3588,9 +3588,10 @@ static void loadpalette(void)
     
     if ((palookup[0] = (uint8_t  *)kkmalloc(numpalookups<<8)) == NULL)
         allocache(&palookup[0],numpalookups<<8,&permanentlock);
-    
-    //Transluctent pallete is 65KB.
-    if ((transluc = (uint8_t  *)kkmalloc(65536)) == NULL)
+
+    /* transluc is now a static 65KB PSRAM array (draw.c: transluc_storage),
+       already initialised to the right pointer — just verify it is non-NULL. */
+    if (transluc == NULL)
         allocache(&transluc,65536,&permanentlock);
 
     globalpalwritten = palookup[0];
@@ -3650,9 +3651,14 @@ void initengine(void)
     for(i=0; i<MAXPALOOKUPS; i++)
         palookup[i] = NULL;
 
-    tiles = heap_caps_malloc(sizeof(tile_t) * MAXTILES, MALLOC_CAP_SPIRAM);
+    // tiles is a static EXT_RAM_ATTR array (tiles_psram[] in tiles.c) — no heap alloc needed.
+    // MAXSPRITES was reduced 4096→2048 (saves ~248KB PSRAM BSS) to offset the
+    // 108KB added by tiles_psram[MAXTILES] in BSS. Net: ~140KB more PSRAM heap.
+    printf("initengine: PSRAM free=%d tiles=%p\n",
+        (int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM), (void*)tiles);
+    memset(tiles, 0, sizeof(tile_t) * MAXTILES);
     for(i=0 ; i < MAXTILES ; i++)
-        tiles[i].data = NULL;
+        waloff[i] = NULL;
 
     clearbuf(&show2dsector[0],(int32_t)((MAXSECTORS+3)>>5),0L);
     clearbuf(&show2dsprite[0],(int32_t)((MAXSPRITES+3)>>5),0L);
@@ -3675,10 +3681,8 @@ void initengine(void)
 
 void uninitengine(void)
 {
-    if (transluc != NULL) {
-        kkfree(transluc);
-        transluc = NULL;
-    }
+    /* transluc points to static PSRAM storage — do not free it. */
+    transluc = NULL;
     if (pic != NULL) {
         kkfree(pic);
         pic = NULL;
@@ -3951,7 +3955,7 @@ IRAM_ATTR static void  dorotatesprite (int32_t sx, int32_t sy, int32_t z, short 
     TILE_MakeAvailable(picnum);
     
     setgotpic(picnum);
-    bufplc = tiles[picnum].data;
+    bufplc = waloff[picnum];
 
     palookupoffs = palookup[dapalnum] + (getpalookup(0L,(int32_t)dashade)<<8);
 
@@ -5659,7 +5663,7 @@ IRAM_ATTR static void drawsprite (int32_t snum)
         TILE_MakeAvailable(globalpicnum);
         
         setgotpic(globalpicnum);
-        globalbufplc = tiles[globalpicnum].data;
+        globalbufplc = waloff[globalpicnum];
 
         globvis = mulscale16(globalhisibility,viewingrange);
         if (sec->visibility != 0) globvis = mulscale4(globvis,(int32_t)((uint8_t )(sec->visibility+16)));
@@ -8753,7 +8757,7 @@ void drawmapview(int32_t dax, int32_t day, int32_t zoome, short ang)
             
             TILE_MakeAvailable(globalpicnum);
             
-            globalbufplc = tiles[globalpicnum].data;
+            globalbufplc = waloff[globalpicnum];
             
             globalshade = max(min(sec->floorshade,numpalookups-1),0);
             globvis = globalhisibility;
@@ -8937,7 +8941,7 @@ void drawmapview(int32_t dax, int32_t day, int32_t zoome, short ang)
             
             TILE_MakeAvailable(globalpicnum);
             
-            globalbufplc = tiles[globalpicnum].data;
+            globalbufplc = waloff[globalpicnum];
             if ((sector[spr->sectnum].ceilingstat&1) > 0)
                 globalshade = ((int32_t)sector[spr->sectnum].ceilingshade);
             else

@@ -3296,8 +3296,8 @@ IRAM_ATTR void displayrooms(short snum,int32_t smoothratio)
         if(screencapt)
         {
             tiles[MAXTILES-1].lock = 254;
-            if (tiles[MAXTILES-1].data == NULL)
-                allocache(&tiles[MAXTILES-1].data,100*160,&tiles[MAXTILES-1].lock);
+            if (waloff[MAXTILES-1] == NULL)
+                allocache(&waloff[MAXTILES-1],100*160,&tiles[MAXTILES-1].lock);
             
             setviewtotile(MAXTILES-1,100L,160L);
         }
@@ -3306,8 +3306,8 @@ IRAM_ATTR void displayrooms(short snum,int32_t smoothratio)
                 if (ud.screen_tilting) tang = p->rotscrnang; else tang = 0;
 
                 tiles[MAXTILES-2].lock = 255;
-                if (tiles[MAXTILES-2].data == NULL)
-                    allocache(&tiles[MAXTILES-2].data,320L*320L,&tiles[MAXTILES-2].lock);
+                if (waloff[MAXTILES-2] == NULL)
+                    allocache(&waloff[MAXTILES-2],320L*320L,&tiles[MAXTILES-2].lock);
                 if ((tang&1023) == 0)
                     setviewtotile(MAXTILES-2,200L>>(1-ud.detail),320L>>(1-ud.detail));
                 else
@@ -6861,7 +6861,7 @@ void nonsharedkeys(void)
                 cmenu(350);
                 screencapt = 1;
                 displayrooms(myconnectindex,65536);
-                savetemp("duke3d.tmp",tiles[MAXTILES-1].data,160*100);
+                savetemp("duke3d.tmp",waloff[MAXTILES-1],160*100);
                 screencapt = 0;
                 FX_StopAllSounds();
                 clearsoundlocks();
@@ -6933,7 +6933,7 @@ void nonsharedkeys(void)
             }
             screencapt = 1;
             displayrooms(myconnectindex,65536);
-            savetemp("duke3d.tmp",tiles[MAXTILES-1].data,160*100);
+            savetemp("duke3d.tmp",waloff[MAXTILES-1],160*100);
             screencapt = 0;
             if( lastsavedpos >= 0 )
             {
@@ -7770,10 +7770,15 @@ void Startup(void)
 // CTW END - MODIFICATION
    inittimer(TICRATE);
 
+   if (!tiles) {
+       printf("FATAL: initengine failed (tiles==NULL), aborting Startup\n");
+       return;
+   }
+
    puts("Loading art header.");
 
   loadpics("tiles000.art", "\0");
-   
+
 
    readsavenames();
 
@@ -8296,6 +8301,11 @@ int main(int argc,char  **argv)
 
 
     Startup();
+
+    if (!tiles) {
+        printf("FATAL: Startup failed (tiles==NULL), cannot continue\n");
+        return 1;
+    }
 
     if( eightytwofifty && numplayers > 1 && (MusicDevice != NumSoundCards) )
     {
@@ -9536,7 +9546,7 @@ uint8_t  domovethings(void)
 			// FIX_00058: Save/load game crash in both single and multiplayer
             screencapt = 1;
             displayrooms(myconnectindex,65536);
-            savetemp("duke3d.tmp",tiles[MAXTILES-1].data,160*100);
+            savetemp("duke3d.tmp",waloff[MAXTILES-1],160*100);
             screencapt = 0;
 
             saveplayer( multipos );

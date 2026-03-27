@@ -16,7 +16,16 @@
 
 char  artfilename[20];
 
-tile_t *tiles;//[MAXTILES];
+/* Static PSRAM BSS allocation for tiles — avoids heap_caps_malloc which fails on
+   2MB PSRAM devices where heap is nearly exhausted by other EXT_RAM_ATTR BSS arrays.
+   9216 * 12 bytes = 110,592 bytes in PSRAM BSS. Freed by MAXSPRITES 4096→2048 (−248KB). */
+EXT_RAM_ATTR static tile_t tiles_psram[MAXTILES];
+tile_t *tiles = tiles_psram;
+
+/* Separate per-tile texture data pointers. tile_t::data was removed to shrink
+   tile_t from 16→12 bytes. waloff in PSRAM BSS (9216 * 4 = 36,864 bytes) to
+   keep internal DRAM free for WiFi driver (~100KB needed). */
+EXT_RAM_ATTR uint8_t* waloff[MAXTILES];
 
 int32_t numTiles;
 
@@ -38,7 +47,7 @@ void setviewtotile(short tilenume, int32_t tileWidth, int32_t tileHeight)
     bakvidoption[setviewcnt] = vidoption;
     vidoption = 2;
     bakframeplace[setviewcnt] = frameplace;
-    frameplace = tiles[tilenume].data;
+    frameplace = waloff[tilenume];
     bakwindowx1[setviewcnt] = windowx1;
     bakwindowy1[setviewcnt] = windowy1;
     bakwindowx2[setviewcnt] = windowx2;
@@ -75,7 +84,7 @@ void squarerotatetile(short tilenume)
         k = (tileDim.width<<1);
         for(i=tileDim.width-1; i>=0; i--)
         {
-            ptr1 = tiles[tilenume].data+i*(tileDim.width+1);
+            ptr1 = waloff[tilenume]+i*(tileDim.width+1);
             ptr2 = ptr1;
             if ((i&1) != 0) {
                 ptr1--;
@@ -145,17 +154,17 @@ void loadtile(short tilenume)
         faketimerhandler();
     }
     
-    if (tiles[tilenume].data == NULL){
+    if (waloff[tilenume] == NULL){
         tiles[tilenume].lock = 199;
-        allocache(&tiles[tilenume].data,tileFilesize,(uint8_t  *) &tiles[tilenume].lock);
+        allocache(&waloff[tilenume],tileFilesize,(uint8_t  *) &tiles[tilenume].lock);
     }
-    
+
     if (artfilplc != tilefileoffs[tilenume])
     {
         klseek(artfil,tilefileoffs[tilenume]-artfilplc,SEEK_CUR);
         faketimerhandler();
     }
-    ptr = tiles[tilenume].data;
+    ptr = waloff[tilenume];
     
     kread(artfil,ptr,tileFilesize);
     faketimerhandler();
@@ -176,7 +185,7 @@ uint8_t* allocatepermanenttile(short tilenume, int32_t width, int32_t height)
     tileDataSize = width * height;
     
     tiles[tilenume].lock = 255;
-    allocache(&tiles[tilenume].data,tileDataSize,(uint8_t  *) &tiles[tilenume].lock);
+    allocache(&waloff[tilenume],tileDataSize,(uint8_t  *) &tiles[tilenume].lock);
     
     tiles[tilenume].dim.width = width;
     tiles[tilenume].dim.height = height;
@@ -192,7 +201,7 @@ uint8_t* allocatepermanenttile(short tilenume, int32_t width, int32_t height)
         j--;
     picsiz[tilenume] += ((uint8_t )(j<<4));
     
-    return(tiles[tilenume].data);
+    return(waloff[tilenume]);
 }
 
 
@@ -303,7 +312,7 @@ int loadpics(char  *filename, char * gamedir)
 
 
 void TILE_MakeAvailable(short picID){
-    if (tiles[picID].data == NULL) 
+    if (waloff[picID] == NULL)
         loadtile(picID);
 
 }
@@ -336,8 +345,8 @@ void copytilepiece(int32_t tilenume1, int32_t sx1, int32_t sy1, int32_t xsiz, in
                 y2 = sy2+j;
                 if ((x2 >= 0) && (y2 >= 0) && (x2 < xsiz2) && (y2 < ysiz2))
                 {
-                    ptr1 = tiles[tilenume1].data + x1*ysiz1 + y1;
-                    ptr2 = tiles[tilenume2].data + x2*ysiz2 + y2;
+                    ptr1 = waloff[tilenume1] + x1*ysiz1 + y1;
+                    ptr2 = waloff[tilenume2] + x2*ysiz2 + y2;
                     dat = *ptr1;
                     
                     

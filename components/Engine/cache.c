@@ -73,8 +73,8 @@ cactype;
 EXT_RAM_ATTR cactype cac[MAXCACHEOBJECTS];
 EXT_RAM_ATTR int32_t lockrecip[200];
 
-// TC game directory
-char  game_dir[512] = { "/sd/duke3d\0" };
+// TC game directory — ESP32: SD card mounted at /sdcard; GRP lives in /sdcard/duke3d/
+char  game_dir[512] = { "/sdcard/duke3d\0" };
 
 void initcache(uint8_t* dacachestart, int32_t dacachesize)
 {

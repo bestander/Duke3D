@@ -52,17 +52,17 @@ void cachespritenum(short i)
         case HYDRENT:
             tloadtile(BROKEFIREHYDRENT);
             for(j = TOILETWATER; j < (TOILETWATER+4); j++)
-                if(tiles[j].data == NULL) tloadtile(j);
+                if(waloff[j] == NULL) tloadtile(j);
             break;
         case TOILET:
             tloadtile(TOILETBROKE);
             for(j = TOILETWATER; j < (TOILETWATER+4); j++)
-                if(tiles[j].data == NULL) tloadtile(j);
+                if(waloff[j] == NULL) tloadtile(j);
             break;
         case STALL:
             tloadtile(STALLBROKE);
             for(j = TOILETWATER; j < (TOILETWATER+4); j++)
-                if(tiles[j].data == NULL) tloadtile(j);
+                if(waloff[j] == NULL) tloadtile(j);
             break;
         case RUBBERCAN:
             maxc = 2;
@@ -80,17 +80,17 @@ void cachespritenum(short i)
         case LIZTROOPONTOILET:
         case LIZTROOPDUCKING:
             for(j = LIZTROOP; j < (LIZTROOP+72); j++)
-                if(tiles[j].data == NULL)
+                if(waloff[j] == NULL)
                     tloadtile(j);
             for(j=HEADJIB1;j<LEGJIB1+3;j++)
-                if(tiles[j].data == NULL)
+                if(waloff[j] == NULL)
                     tloadtile(j);
             maxc = 0;
             break;
         case WOODENHORSE:
             maxc = 5;
             for(j = HORSEONSIDE; j < (HORSEONSIDE+4); j++)
-                if(tiles[j].data == NULL)
+                if(waloff[j] == NULL)
                     tloadtile(j);
             break;
         case NEWBEAST:
@@ -123,7 +123,7 @@ void cachespritenum(short i)
         case LIZMANFEEDING:
         case LIZMANJUMP:
             for(j=LIZMANHEAD1;j<LIZMANLEG1+3;j++)
-                if(tiles[j].data == NULL)
+                if(waloff[j] == NULL)
                     tloadtile(j);
             maxc = 80;
             break;
@@ -133,7 +133,7 @@ void cachespritenum(short i)
             {
                 maxc = 5;
                 for(j = 1420;j < 1420+106; j++)
-                    if(tiles[j].data == NULL)
+                    if(waloff[j] == NULL)
                         tloadtile(j);
             }
             break;
@@ -155,7 +155,7 @@ void cachespritenum(short i)
     }
 
     for(j = PN; j < (PN+maxc); j++)
-        if(tiles[j].data == NULL)
+        if(waloff[j] == NULL)
             tloadtile(j);
 }
 
@@ -165,14 +165,14 @@ void cachegoodsprites(void)
 
     if(ud.screen_size >= 8)
     {
-        if(tiles[BOTTOMSTATUSBAR].data == NULL)
+        if(waloff[BOTTOMSTATUSBAR] == NULL)
             tloadtile(BOTTOMSTATUSBAR);
         if( ud.multimode > 1)
         {
-            if(tiles[FRAGBAR].data == NULL)
+            if(waloff[FRAGBAR] == NULL)
                 tloadtile(FRAGBAR);
             for(i=MINIFONT;i<MINIFONT+63;i++)
-                if(tiles[i].data == NULL)
+                if(waloff[i] == NULL)
                     tloadtile(i);
         }
     }
@@ -180,55 +180,55 @@ void cachegoodsprites(void)
     tloadtile(VIEWSCREEN);
 
     for(i=STARTALPHANUM;i<ENDALPHANUM+1;i++)
-        if (tiles[i].data == NULL)
+        if (waloff[i] == NULL)
             tloadtile(i);
 
     for(i=FOOTPRINTS;i<FOOTPRINTS+3;i++)
-        if (tiles[i].data == NULL)
+        if (waloff[i] == NULL)
             tloadtile(i);
 
     for( i = BIGALPHANUM; i < BIGALPHANUM+82; i++)
-        if(tiles[i].data == NULL)
+        if(waloff[i] == NULL)
             tloadtile(i);
 
     for( i = BURNING; i < BURNING+14; i++)
-        if(tiles[i].data == NULL)
+        if(waloff[i] == NULL)
             tloadtile(i);
 
     for( i = BURNING2; i < BURNING2+14; i++)
-        if(tiles[i].data == NULL)
+        if(waloff[i] == NULL)
             tloadtile(i);
 
     for( i = CRACKKNUCKLES; i < CRACKKNUCKLES+4; i++)
-        if(tiles[i].data == NULL)
+        if(waloff[i] == NULL)
             tloadtile(i);
 
     for( i = FIRSTGUN; i < FIRSTGUN+3 ; i++ )
-        if(tiles[i].data == NULL)
+        if(waloff[i] == NULL)
             tloadtile(i);
 
     for( i = EXPLOSION2; i < EXPLOSION2+21 ; i++ )
-        if(tiles[i].data == NULL)
+        if(waloff[i] == NULL)
             tloadtile(i);
 
     tloadtile(BULLETHOLE);
 
     for( i = FIRSTGUNRELOAD; i < FIRSTGUNRELOAD+8 ; i++ )
-        if(tiles[i].data == NULL)
+        if(waloff[i] == NULL)
             tloadtile(i);
 
     tloadtile(FOOTPRINTS);
 
     for( i = JIBS1; i < (JIBS5+5); i++)
-        if(tiles[i].data == NULL)
+        if(waloff[i] == NULL)
             tloadtile(i);
 
     for( i = SCRAP1; i < (SCRAP1+19); i++)
-        if(tiles[i].data == NULL)
+        if(waloff[i] == NULL)
             tloadtile(i);
 
     for( i = SMALLSMOKE; i < (SMALLSMOKE+4); i++)
-        if(tiles[i].data == NULL)
+        if(waloff[i] == NULL)
             tloadtile(i);
 }
 
@@ -286,22 +286,22 @@ void cacheit(void)
     cachegoodsprites();
 
     for(i=0;i<numwalls;i++)
-        if( tiles[wall[i].picnum].data == NULL)
+        if( waloff[wall[i].picnum] == NULL)
     {
-        if(tiles[wall[i].picnum].data == NULL)
+        if(waloff[wall[i].picnum] == NULL)
             tloadtile(wall[i].picnum);
-        if(wall[i].overpicnum >= 0 && tiles[wall[i].overpicnum].data == NULL )
+        if(wall[i].overpicnum >= 0 && waloff[wall[i].overpicnum] == NULL )
             tloadtile(wall[i].overpicnum);
     }
 
     for(i=0;i<numsectors;i++)
     {
-        if( tiles[sector[i].floorpicnum].data == NULL )
+        if( waloff[sector[i].floorpicnum] == NULL )
             tloadtile( sector[i].floorpicnum );
-        if( tiles[sector[i].ceilingpicnum].data == NULL )
+        if( waloff[sector[i].ceilingpicnum] == NULL )
         {
             tloadtile( sector[i].ceilingpicnum );
-            if( tiles[sector[i].ceilingpicnum].data == (uint8_t*)LA)
+            if( waloff[sector[i].ceilingpicnum] == (uint8_t*)LA)
             {
                 tloadtile(LA+1);
                 tloadtile(LA+2);
@@ -312,7 +312,7 @@ void cacheit(void)
         while(j >= 0)
         {
             if(sprite[j].xrepeat != 0 && sprite[j].yrepeat != 0 && (sprite[j].cstat&32768) == 0)
-                if(tiles[sprite[j].picnum].data == NULL)
+                if(waloff[sprite[j].picnum] == NULL)
                     cachespritenum(j);
             j = nextspritesect[j];
         }
@@ -327,7 +327,7 @@ void docacheit(void)
     j = 0;
 
     for(i=0;i<MAXTILES;i++)
-        if( (gotpic[i>>3]&(1<<(i&7))) && tiles[i].data == NULL)
+        if( (gotpic[i>>3]&(1<<(i&7))) && waloff[i] == NULL)
     {
         loadtile((short)i);
         j++;
@@ -342,7 +342,7 @@ void docacheit(void)
 
 void xyzmirror(short i,short tileId)
 {
-    if (tiles[tileId].data == NULL)
+    if (waloff[tileId] == NULL)
         loadtile(tileId);
     
 	setviewtotile(tileId,tiles[tileId].dim.height,tiles[tileId].dim.width);
@@ -696,11 +696,11 @@ void prelevel(uint8_t  g)
 
         if(sector[i].ceilingstat&1)
         {
-            if(tiles[sector[i].ceilingpicnum].data == NULL)
+            if(waloff[sector[i].ceilingpicnum] == NULL)
             {
                 if(sector[i].ceilingpicnum == LA)
                     for(j=0;j<5;j++)
-                        if(tiles[sector[i].ceilingpicnum+j].data == NULL)
+                        if(waloff[sector[i].ceilingpicnum+j] == NULL)
                             tloadtile(sector[i].ceilingpicnum+j);
             }
             setupbackdrop(sector[i].ceilingpicnum);
@@ -875,7 +875,7 @@ void prelevel(uint8_t  g)
                 break;
 
             case W_FORCEFIELD:
-                if(tiles[W_FORCEFIELD].data == NULL)
+                if(waloff[W_FORCEFIELD] == NULL)
                     for(j=0;j<3;j++)
                         tloadtile(W_FORCEFIELD+j);
             case W_FORCEFIELD+1:
@@ -903,13 +903,13 @@ void prelevel(uint8_t  g)
         {
             case WATERTILE2:
                 for(j=0;j<3;j++)
-                    if(tiles[wal->picnum+j].data == NULL)
+                    if(waloff[wal->picnum+j] == NULL)
                         tloadtile(wal->picnum+j);
                 break;
 
             case TECHLIGHT2:
             case TECHLIGHT4:
-                if(tiles[wal->picnum].data == NULL)
+                if(waloff[wal->picnum] == NULL)
                     tloadtile(wal->picnum);
                 break;
             case W_TECHWALL1:
@@ -923,7 +923,7 @@ void prelevel(uint8_t  g)
             case SCREENBREAK6:
             case SCREENBREAK7:
             case SCREENBREAK8:
-                if(tiles[SCREENBREAK6].data == NULL)
+                if(waloff[SCREENBREAK6] == NULL)
                     for(j=SCREENBREAK6;j<SCREENBREAK9;j++)
                         tloadtile(j);
                 animwall[numanimwalls].wallnum = i;

@@ -1,10 +1,20 @@
 #include "SDL_video.h"
+#include <esp_timer.h>
+#include "esp_attr.h"
 
 
 
 #define SPI_BUS TFT_VSPI_HOST
 
 SDL_Surface* primary_surface;
+
+/* Static framebuffer for the primary 320x200 SDL surface.
+   Placed in internal DRAM (no EXT_RAM_BSS_ATTR) to avoid the BSS zero-init
+   stall that occurs when EXT_RAM_BSS symbols land beyond the physical 2MB PSRAM
+   boundary. Internal DRAM has ~250KB free at this point so 64KB fits. */
+static uint8_t sdl_framebuffer_storage[320 * 200];
+static SDL_Surface  sdl_primary_surface_storage;
+static SDL_PixelFormat sdl_primary_pixelformat_storage;
 
 int SDL_LockSurface(SDL_Surface *surface)
 {
@@ -81,19 +91,49 @@ int SDL_InitSubSystem(Uint32 flags)
 
 SDL_Surface *SDL_CreateRGBSurface(Uint32 flags, int width, int height, int depth, Uint32 Rmask, Uint32 Gmask, Uint32 Bmask, Uint32 Amask)
 {
-    SDL_Surface *surface = (SDL_Surface *)calloc(1, sizeof(SDL_Surface));
+    SDL_Surface *surface;
+    SDL_PixelFormat *pf;
+    int pixel_bytes = width * height * (depth / 8);
+
+    /* For the primary 320x200 surface use the pre-allocated static PSRAM
+       storage to avoid heap exhaustion (~41 KB PSRAM free at this point).
+       Secondary surfaces (tile rendering etc.) fall back to heap. */
+    if (primary_surface == NULL && pixel_bytes <= (int)sizeof(sdl_framebuffer_storage)) {
+        surface = &sdl_primary_surface_storage;
+        pf      = &sdl_primary_pixelformat_storage;
+        memset(surface, 0, sizeof(*surface));
+        memset(pf,      0, sizeof(*pf));
+        surface->pixels = sdl_framebuffer_storage;
+        printf("SDL_CreateRGBSurface: using static PSRAM framebuffer (%d bytes)\n", pixel_bytes);
+    } else {
+        surface = (SDL_Surface *)calloc(1, sizeof(SDL_Surface));
+        pf      = (SDL_PixelFormat *)calloc(1, sizeof(SDL_PixelFormat));
+        if (!surface || !pf) {
+            free(surface); free(pf);
+            printf("FATAL: SDL_CreateRGBSurface struct alloc failed\n");
+            return NULL;
+        }
+        surface->pixels = heap_caps_malloc(pixel_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!surface->pixels) surface->pixels = heap_caps_malloc(pixel_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (!surface->pixels) {
+            printf("FATAL: SDL_CreateRGBSurface pixels alloc failed (%d bytes)\n", pixel_bytes);
+            free(pf);
+            free(surface);
+            return NULL;
+        }
+    }
+
     SDL_Rect rect = { .x=0, .y=0, .w=width, .h=height};
     SDL_Color col = {.r=0, .g=0, .b=0, .unused=0};
     SDL_Palette pal =  {.ncolors=1, .colors=&col};
-    SDL_PixelFormat* pf = (SDL_PixelFormat*)calloc(1, sizeof(SDL_PixelFormat));
-	pf->palette = &pal;
-	pf->BitsPerPixel = 8;
-	pf->BytesPerPixel = 1;
-	pf->Rloss = 0; pf->Gloss = 0; pf->Bloss = 0; pf->Aloss = 0,
-	pf->Rshift = 0; pf->Gshift = 0; pf->Bshift = 0; pf->Ashift = 0;
-	pf->Rmask = 0; pf->Gmask = 0; pf->Bmask = 0; pf->Amask = 0;
-	pf->colorkey = 0;
-	pf->alpha = 0;
+    pf->palette = &pal;
+    pf->BitsPerPixel = 8;
+    pf->BytesPerPixel = 1;
+    pf->Rloss = 0; pf->Gloss = 0; pf->Bloss = 0; pf->Aloss = 0;
+    pf->Rshift = 0; pf->Gshift = 0; pf->Bshift = 0; pf->Ashift = 0;
+    pf->Rmask = 0; pf->Gmask = 0; pf->Bmask = 0; pf->Amask = 0;
+    pf->colorkey = 0;
+    pf->alpha = 0;
 
     surface->flags = flags;
     surface->format = pf;
@@ -102,10 +142,9 @@ SDL_Surface *SDL_CreateRGBSurface(Uint32 flags, int width, int height, int depth
     surface->pitch = width*(depth/8);
     surface->clip_rect = rect;
     surface->refcount = 1;
-    surface->pixels = heap_caps_malloc(width*height*1, MALLOC_CAP_SPIRAM);
-    memset(surface->pixels,0,(width*height/sizeof(surface->pixels)));
+    memset(surface->pixels, 0, pixel_bytes);
     if(primary_surface == NULL)
-    	primary_surface = surface;
+        primary_surface = surface;
     return surface;
 }
 
@@ -201,7 +240,7 @@ void SDL_LockDisplay()
         //xSemaphoreGive(display_mutex);
     }
 
-    if (!xSemaphoreTake(display_mutex, 60000 / portTICK_RATE_MS))
+    if (!xSemaphoreTake(display_mutex, 60000 / portTICK_PERIOD_MS))
     {
         printf("Timeout waiting for display lock.\n");
         abort();

@@ -209,11 +209,11 @@ int loadpheader(uint8_t  spot,int32 *vn,int32 *ln,int32 *psk,int32 *nump)
          kdfread(ln,sizeof(int32),1,fil);
      kdfread(psk,sizeof(int32),1,fil);
 
-     if (tiles[MAXTILES-3].data == NULL)
-         allocache(&tiles[MAXTILES-3].data,160*100,&tiles[MAXTILES-3].lock);
+     if (waloff[MAXTILES-3] == NULL)
+         allocache(&waloff[MAXTILES-3],160*100,&tiles[MAXTILES-3].lock);
     tiles[MAXTILES-3].dim.width = 100;
     tiles[MAXTILES-3].dim.height = 160;
-    kdfread(tiles[MAXTILES-3].data,160,100,fil);
+    kdfread(waloff[MAXTILES-3],160,100,fil);
     kclose(fil);
     return(0);
 }
@@ -321,13 +321,13 @@ int loadplayer(int8_t spot)
                  //Fake read because lseek won't work with compression
      tiles[MAXTILES-3].lock = 1;
     
-     if (tiles[MAXTILES-3].data == NULL)
-         allocache(&tiles[MAXTILES-3].data,160*100,&tiles[MAXTILES-3].lock);
+     if (waloff[MAXTILES-3] == NULL)
+         allocache(&waloff[MAXTILES-3],160*100,&tiles[MAXTILES-3].lock);
     
      tiles[MAXTILES-3].dim.width = 100;
     tiles[MAXTILES-3].dim.height = 160;
     
-     kdfread(tiles[MAXTILES-3].data,160,100,fil);
+     kdfread(waloff[MAXTILES-3],160,100,fil);
 
          kdfread(&numwalls,2,1,fil);
      kdfread(&wall[0],sizeof(walltype),MAXWALLS,fil);
@@ -612,7 +612,7 @@ int saveplayer(int8_t spot)
          dfwrite(&ud.volume_number,sizeof(ud.volume_number),1,fil);
      dfwrite(&ud.level_number,sizeof(ud.level_number),1,fil);
          dfwrite(&ud.player_skill,sizeof(ud.player_skill),1,fil);
-     dfwrite(tiles[MAXTILES-1].data,160,100,fil);
+     dfwrite(waloff[MAXTILES-1],160,100,fil);
 
          dfwrite(&numwalls,2,1,fil);
      dfwrite(&wall[0],sizeof(walltype),MAXWALLS,fil);
@@ -3268,7 +3268,7 @@ else
             cmenu(351);
             screencapt = 1;
             displayrooms(myconnectindex,65536);
-            savetemp("duke3d.tmp",tiles[MAXTILES-1].data,160*100);
+            savetemp("duke3d.tmp",waloff[MAXTILES-1],160*100);
             screencapt = 0;
             break;
 
@@ -4695,7 +4695,7 @@ ESP_LOGV(TAG, "KB_KeyWaiting");
        else                           ototalclock += 10;
 
 ESP_LOGV(TAG, "ANIM_DrawFrame");
-       tiles[MAXTILES-3-t].data = ANIM_DrawFrame(i);
+       waloff[MAXTILES-3-t] = ANIM_DrawFrame(i);
 ESP_LOGV(TAG, "rotatesprite");
        rotatesprite(0<<16,0<<16,65536L,512,MAXTILES-3-t,0,0,2+4+8+16+64, 0,0,xdim-1,ydim-1);
 ESP_LOGV(TAG, "nextpage");

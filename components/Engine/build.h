@@ -14,8 +14,8 @@
 #endif
 
 #define MAXSECTORS 1024
-#define MAXWALLS 8192
-#define MAXSPRITES 4096
+#define MAXWALLS 4096  // reduced from 8192; saves 128KB PSRAM BSS on 2MB device
+#define MAXSPRITES 2048  // reduced from 4096; saves 248KB PSRAM BSS on 2MB device
 #define MAXTILES 9216
 
 #define MAXSTATUS 1024
