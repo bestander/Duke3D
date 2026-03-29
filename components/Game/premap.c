@@ -27,6 +27,7 @@ Prepared for public release: 03/21/2003 - Charlie Wiederhold, 3D Realms
 #include "duke3d.h"
 #include "filesystem.h"
 #include "game.h"
+#include "duke3d_wifi_sync.h"
 
 
 extern uint8_t  everyothertime;
@@ -1545,7 +1546,9 @@ if (!VOLUMEONE)
         sprintf(text,"Internal Map %s not found in Shareware grp pack!\n",level_file_names[(ud.volume_number*11)+ud.level_number]);
         gameexit(text);
     }
-}
+    }
+
+    duke3d_notify_level_enter(g);
 
     clearbufbyte(gotpic,sizeof(gotpic),0L);
 

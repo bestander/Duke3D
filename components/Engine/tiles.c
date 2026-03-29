@@ -23,9 +23,7 @@ volatile int64_t diag_tile_us    = 0;   // microseconds spent in kread() this fr
 
 char  artfilename[20];
 
-/* Static PSRAM BSS allocation for tiles — avoids heap_caps_malloc which fails on
-   2MB PSRAM devices where heap is nearly exhausted by other EXT_RAM_ATTR BSS arrays.
-   9216 * 12 bytes = 110,592 bytes in PSRAM BSS. Freed by MAXSPRITES 4096→2048 (−248KB). */
+/* Static PSRAM BSS for tile metadata — avoids depending on a large heap slab. */
 EXT_RAM_ATTR static tile_t tiles_psram[MAXTILES];
 tile_t *tiles = tiles_psram;
 
@@ -124,12 +122,10 @@ IRAM_ATTR void setgotpic(int32_t tilenume)
 
 
 
-// Maximum tile dimension stored in cache for 64×40 display.
-// Tiles larger than this are downsampled on load; picsiz is updated so the
-// renderer uses the correct (smaller) texture coordinate mask.
-// tiles[].dim is NOT changed so sprite screen-size calculations stay correct
-// and tileFilesize is always recomputed from the original ART dimensions.
-#define MAX_TILE_DIM 32
+// GRP path: load natively up to DUKE3D_TILE_MAX_NATIVE_EDGE (same as TCACHE.BIN);
+// larger tiles are halved until within that limit. tiles[].dim stays at ART
+// dimensions; picsiz is updated when downscaling so drawing uses the right mask.
+#define MAX_TILE_DIM DUKE3D_TILE_MAX_NATIVE_EDGE
 
 void loadtile(short tilenume)
 {
@@ -146,7 +142,7 @@ void loadtile(short tilenume)
     if (tileFilesize <= 0)
         return;
 
-    // Fast path: read pre-downscaled tile from TILECACHE.BIN (one seek + one read).
+    // Fast path: read native-resolution tile from TILECACHE.BIN (one seek + one read).
     // Falls through to the GRP path if tile is absent from the cache.
     if (waloff[tilenume] == NULL) {
         TileCacheHit hit;
@@ -364,13 +360,8 @@ int loadpics(char  *filename, char * gamedir)
     printf("Art files loaded\n");
     
     clearbuf(gotpic,(MAXTILES+31)>>5,0L);
-    
-    /* try dpmi_DETERMINEMAXREALALLOC! */
-    heap_caps_print_heap_info(MALLOC_CAP_SPIRAM);
 
-    // Allocate tile cache explicitly from PSRAM (bypasses internal heap fragmentation).
-    // On this 2MB PSRAM device ~256KB is typically available after BSS + runtime allocs;
-    // start at 512KB and step by 64KB to find the largest contiguous block.
+    // Allocate art cache from PSRAM — internal DRAM is fragmented after WiFi/SD/HUB75.
     cachesize = 512 * 1024;
     while ((pic = (uint8_t*)heap_caps_malloc(cachesize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)) == NULL)
     {
