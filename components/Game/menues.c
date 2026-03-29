@@ -4636,6 +4636,14 @@ ESP_LOGV(TAG, "TCkopen4load");
 ESP_LOGV(TAG, "kfilelength");
     length = kfilelength(handle);
 
+    // Skip animations that are too large for the cache (embedded device limitation).
+    if ((int32_t)(length + sizeof(anim_t) + 15) > cachesize)
+    {
+        printf("playanm: skipping '%s' (%d bytes > cachesize %d)\n", fn, (int)length, cachesize);
+        kclose(handle);
+        return;
+    }
+
     tiles[MAXTILES-3-t].lock = 219+t;
 
 ESP_LOGV(TAG, "allocache");

@@ -8,11 +8,9 @@
 
 SDL_Surface* primary_surface;
 
-/* Static framebuffer for the primary 320x200 SDL surface.
-   Placed in internal DRAM (no EXT_RAM_BSS_ATTR) to avoid the BSS zero-init
-   stall that occurs when EXT_RAM_BSS symbols land beyond the physical 2MB PSRAM
-   boundary. Internal DRAM has ~250KB free at this point so 64KB fits. */
-static uint8_t sdl_framebuffer_storage[320 * 200];
+/* Static framebuffer for the primary 64x40 SDL surface (native matrix resolution).
+   Placed in internal DRAM — only 2560 bytes, negligible cost. */
+static uint8_t sdl_framebuffer_storage[64 * 40];
 static SDL_Surface  sdl_primary_surface_storage;
 static SDL_PixelFormat sdl_primary_pixelformat_storage;
 
@@ -45,7 +43,7 @@ char *SDL_VideoDriverName(char *namebuf, int maxlen)
 
 SDL_Rect **SDL_ListModes(SDL_PixelFormat *format, Uint32 flags)
 {
-    SDL_Rect mode[1] = {{0,0,320,200}};
+    SDL_Rect mode[1] = {{0,0,64,40}};
     return &mode;
 }
 
@@ -80,7 +78,7 @@ int SDL_InitSubSystem(Uint32 flags)
     if(flags == SDL_INIT_VIDEO)
     {
     	spi_lcd_init();
-        SDL_CreateRGBSurface(0, 320, 200, 8, 0,0,0,0);
+        SDL_CreateRGBSurface(0, 64, 40, 8, 0,0,0,0);
     }
     if( flags &= SDL_INIT_AUDIO)
     {
@@ -95,8 +93,7 @@ SDL_Surface *SDL_CreateRGBSurface(Uint32 flags, int width, int height, int depth
     SDL_PixelFormat *pf;
     int pixel_bytes = width * height * (depth / 8);
 
-    /* For the primary 320x200 surface use the pre-allocated static PSRAM
-       storage to avoid heap exhaustion (~41 KB PSRAM free at this point).
+    /* For the primary 64x40 surface use the pre-allocated static storage.
        Secondary surfaces (tile rendering etc.) fall back to heap. */
     if (primary_surface == NULL && pixel_bytes <= (int)sizeof(sdl_framebuffer_storage)) {
         surface = &sdl_primary_surface_storage;
@@ -104,7 +101,7 @@ SDL_Surface *SDL_CreateRGBSurface(Uint32 flags, int width, int height, int depth
         memset(surface, 0, sizeof(*surface));
         memset(pf,      0, sizeof(*pf));
         surface->pixels = sdl_framebuffer_storage;
-        printf("SDL_CreateRGBSurface: using static PSRAM framebuffer (%d bytes)\n", pixel_bytes);
+        printf("SDL_CreateRGBSurface: using static framebuffer (%d bytes)\n", pixel_bytes);
     } else {
         surface = (SDL_Surface *)calloc(1, sizeof(SDL_Surface));
         pf      = (SDL_PixelFormat *)calloc(1, sizeof(SDL_PixelFormat));
@@ -161,7 +158,7 @@ int SDL_FillRect(SDL_Surface *dst, SDL_Rect *dstrect, Uint32 color)
     	if(dstrect != NULL)
     	{
 			for(int y = dstrect->y; y < dstrect->y + dstrect->h;y++)
-				memset((unsigned char *)dst->pixels + y*320 + dstrect->x, (unsigned char)color, dstrect->w);
+				memset((unsigned char *)dst->pixels + y*dst->pitch + dstrect->x, (unsigned char)color, dstrect->w);
     	} else {
     		memset(dst->pixels, (unsigned char)color, dst->pitch*dst->h);
     	}

@@ -193,7 +193,7 @@ extern int g_iTicksPerFrame;
 
 // #define GC (TICSPERFRAME*44)
 
-#define NUM_SOUNDS 450
+#define NUM_SOUNDS 600
 
 #define    ALT_IS_PRESSED ( KB_KeyPressed( sc_RightAlt ) || KB_KeyPressed( sc_LeftAlt ) )
 #define    SHIFTS_IS_PRESSED ( KB_KeyPressed( sc_RightShift ) || KB_KeyPressed( sc_LeftShift ) )

@@ -10,9 +10,16 @@
 #include "engine.h"
 #include "draw.h"
 #include "filesystem.h"
+#include "tilecache.h"
 
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
+
+// Per-frame diagnostic counters — read and reset by spi_lcd_send_boarder() each frame.
+volatile int32_t diag_tile_loads = 0;   // number of loadtile() calls this frame
+volatile int32_t diag_tile_bytes = 0;   // bytes read from SD this frame
+volatile int64_t diag_tile_us    = 0;   // microseconds spent in kread() this frame
 
 char  artfilename[20];
 
@@ -117,58 +124,139 @@ IRAM_ATTR void setgotpic(int32_t tilenume)
 
 
 
+// Maximum tile dimension stored in cache for 64×40 display.
+// Tiles larger than this are downsampled on load; picsiz is updated so the
+// renderer uses the correct (smaller) texture coordinate mask.
+// tiles[].dim is NOT changed so sprite screen-size calculations stay correct
+// and tileFilesize is always recomputed from the original ART dimensions.
+#define MAX_TILE_DIM 32
+
 void loadtile(short tilenume)
 {
     uint8_t  *ptr;
     int32_t i, tileFilesize;
-    
-    
-    
-    
+
     if ((uint32_t)tilenume >= (uint32_t)MAXTILES)
         return;
-    
-    tileFilesize = tiles[tilenume].dim.width * tiles[tilenume].dim.height;
-    
+
+    int32_t orig_w = tiles[tilenume].dim.width;
+    int32_t orig_h = tiles[tilenume].dim.height;
+    tileFilesize = orig_w * orig_h;
+
     if (tileFilesize <= 0)
         return;
-    
+
+    // Fast path: read pre-downscaled tile from TILECACHE.BIN (one seek + one read).
+    // Falls through to the GRP path if tile is absent from the cache.
+    if (waloff[tilenume] == NULL) {
+        TileCacheHit hit;
+        if (tilecache_lookup(tilenume, &hit)) {
+            int64_t _t0 = esp_timer_get_time();
+            tiles[tilenume].lock = 199;
+            allocache(&waloff[tilenume], hit.w * hit.h, (uint8_t*)&tiles[tilenume].lock);
+            tilecache_read(hit.off, waloff[tilenume], hit.w * hit.h);
+            diag_tile_us    += esp_timer_get_time() - _t0;
+            diag_tile_loads += 1;
+            diag_tile_bytes += hit.w * hit.h;
+            int32_t pw = 0, ph = 0, tw = hit.w, th = hit.h;
+            while (tw > 1) { pw++; tw >>= 1; }
+            while (th > 1) { ph++; th >>= 1; }
+            picsiz[tilenume] = (uint8_t)(pw | (ph << 4));
+            return;
+        }
+    }
+
+    // Compute downscaled dimensions: halve each axis until ≤ MAX_TILE_DIM.
+    // Bit-shift keeps the result a power-of-2, which the Build Engine requires
+    // for the bitwise coordinate masking in picsiz.
+    int32_t new_w = orig_w, new_h = orig_h;
+    while (new_w > MAX_TILE_DIM) new_w >>= 1;
+    while (new_h > MAX_TILE_DIM) new_h >>= 1;
+    if (new_w < 1) new_w = 1;
+    if (new_h < 1) new_h = 1;
+
+    // Decide whether to downscale. If yes, try to borrow a temp buffer from
+    // the PSRAM heap for the full-size read; fall back to full-size if OOM.
+    int32_t do_scale = (new_w != orig_w || new_h != orig_h);
+    uint8_t *tmp_buf = NULL;
+    if (do_scale) {
+        tmp_buf = (uint8_t*)heap_caps_malloc(tileFilesize,
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!tmp_buf) do_scale = 0;  // OOM — fall back to full-size direct read
+    }
+
+    int32_t cacheBytes = do_scale ? (new_w * new_h) : tileFilesize;
+
     i = tilefilenum[tilenume];
     if (i != artfilnum){
         if (artfil != -1)
             kclose(artfil);
         artfilnum = i;
         artfilplc = 0L;
-        
+
         artfilename[7] = (i%10)+48;
         artfilename[6] = ((i/10)%10)+48;
         artfilename[5] = ((i/100)%10)+48;
         artfil = TCkopen4load(artfilename,0);
-        
+
         if (artfil == -1){
             printf("Error, unable to load artfile:'%s'.\n",artfilename);
             getchar();
             exit(0);
         }
-        
+
         faketimerhandler();
     }
-    
+
     if (waloff[tilenume] == NULL){
         tiles[tilenume].lock = 199;
-        allocache(&waloff[tilenume],tileFilesize,(uint8_t  *) &tiles[tilenume].lock);
+        allocache(&waloff[tilenume], cacheBytes, (uint8_t*)&tiles[tilenume].lock);
     }
 
     if (artfilplc != tilefileoffs[tilenume])
     {
-        klseek(artfil,tilefileoffs[tilenume]-artfilplc,SEEK_CUR);
+        klseek(artfil, tilefileoffs[tilenume]-artfilplc, SEEK_CUR);
         faketimerhandler();
     }
-    ptr = waloff[tilenume];
-    
-    kread(artfil,ptr,tileFilesize);
+
+    {
+        int64_t _t0 = esp_timer_get_time();
+
+        if (!do_scale) {
+            // No downscaling — read directly into cache slot.
+            kread(artfil, waloff[tilenume], tileFilesize);
+        } else {
+            // Read full tile into PSRAM temp buffer, then nearest-neighbour
+            // downsample into the (smaller) cache slot.
+            // Tile data is column-major: index = x * orig_h + y.
+            kread(artfil, tmp_buf, tileFilesize);
+            uint8_t *dst = waloff[tilenume];
+            for (int32_t x = 0; x < new_w; x++) {
+                int32_t sx = (x * orig_w) / new_w;
+                for (int32_t y = 0; y < new_h; y++) {
+                    int32_t sy = (y * orig_h) / new_h;
+                    dst[x * new_h + y] = tmp_buf[sx * orig_h + sy];
+                }
+            }
+            free(tmp_buf);
+
+            // Update picsiz so the renderer uses the right coordinate mask.
+            // tiles[tilenume].dim is intentionally left at original values so
+            // tileFilesize is correct on re-load and sprite screen-sizing is unchanged.
+            {
+                int32_t pw = 0, ph = 0, w = new_w, h = new_h;
+                while (w > 1) { pw++; w >>= 1; }
+                while (h > 1) { ph++; h >>= 1; }
+                picsiz[tilenume] = (uint8_t)(pw | (ph << 4));
+            }
+        }
+
+        diag_tile_us    += esp_timer_get_time() - _t0;
+        diag_tile_loads += 1;
+        diag_tile_bytes += tileFilesize;
+    }
     faketimerhandler();
-    artfilplc = tilefileoffs[tilenume]+tileFilesize;
+    artfilplc = tilefileoffs[tilenume] + tileFilesize;
 }
 
 
@@ -280,10 +368,13 @@ int loadpics(char  *filename, char * gamedir)
     /* try dpmi_DETERMINEMAXREALALLOC! */
     heap_caps_print_heap_info(MALLOC_CAP_SPIRAM);
 
-    cachesize = max(artsize,1048576);
-    while ((pic = (uint8_t  *)kkmalloc(cachesize)) == NULL)
+    // Allocate tile cache explicitly from PSRAM (bypasses internal heap fragmentation).
+    // On this 2MB PSRAM device ~256KB is typically available after BSS + runtime allocs;
+    // start at 512KB and step by 64KB to find the largest contiguous block.
+    cachesize = 512 * 1024;
+    while ((pic = (uint8_t*)heap_caps_malloc(cachesize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)) == NULL)
     {
-        cachesize -= 65536L;
+        cachesize -= 64 * 1024;
         if (cachesize < 65536) return(-1);
     }
     initcache(pic,cachesize);

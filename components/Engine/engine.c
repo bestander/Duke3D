@@ -2602,6 +2602,8 @@ static void dosetaspect(void)
 {
     int32_t i, j, k, x, xinc;
 
+    if (!horizlookup || !horizlookup2) return;  // allocation failed — skip safely
+
     if (xyaspect != oxyaspect){
         oxyaspect = xyaspect;
         j = xyaspect*320;

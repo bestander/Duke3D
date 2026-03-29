@@ -15,6 +15,7 @@
  */
 #include <stdio.h>
 #include <stdlib.h>
+#include "esp_heap_caps.h"
 #include <stdarg.h>
 #include <assert.h>
 #include <string.h>
@@ -259,7 +260,7 @@ static void init_new_res_vars(int32_t davidoption)
     	switch(vidoption)
     	{
     		case 1:i = xdim*ydim; break;
-    		case 2: xdim = 320; ydim = 200; i = xdim*ydim; break;
+    		case 2: xdim = 64; ydim = 40; i = xdim*ydim; break;
     		
     		default: assert(0);
     	}
@@ -270,9 +271,16 @@ static void init_new_res_vars(int32_t davidoption)
 
 		if(horizlookup2)
 			free(horizlookup2);
-		
-		horizlookup = (int32_t*)malloc(j);
-		horizlookup2 = (int32_t*)malloc(j);
+
+		// Allocate from PSRAM — internal DRAM is fragmented after level loads.
+		horizlookup  = (int32_t*)heap_caps_malloc(j, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+		horizlookup2 = (int32_t*)heap_caps_malloc(j, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+		if (!horizlookup || !horizlookup2)
+		{
+			printf("FATAL: horizlookup alloc failed (need %d bytes PSRAM)\n", j);
+			if (horizlookup)  { free(horizlookup);  horizlookup  = 0; }
+			if (horizlookup2) { free(horizlookup2); horizlookup2 = 0; }
+		}
 
     j = 0;
     

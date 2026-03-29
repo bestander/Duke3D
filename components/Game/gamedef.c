@@ -874,7 +874,14 @@ uint8_t  parsecommand(int readfromGRP)
 
             transnum();
             scriptptr--;
-            actorscrptr[*scriptptr] = parsing_actor;
+            if ((uint32_t)*scriptptr < (uint32_t)MAXTILES)
+                actorscrptr[*scriptptr] = parsing_actor;
+            else
+            {
+                printf("  * ERROR!(L%hd) actor picnum %d out of range (max %d)\n",
+                       line_number, *scriptptr, MAXTILES-1);
+                error++;
+            }
 
             for(j=0;j<4;j++)
             {
@@ -933,8 +940,17 @@ uint8_t  parsecommand(int readfromGRP)
 
             transnum();
             scriptptr--;
-            actorscrptr[*scriptptr] = parsing_actor;
-            actortype[*scriptptr] = j;
+            if ((uint32_t)*scriptptr < (uint32_t)MAXTILES)
+            {
+                actorscrptr[*scriptptr] = parsing_actor;
+                actortype[*scriptptr] = j;
+            }
+            else
+            {
+                printf("  * ERROR!(L%hd) actor picnum %d out of range (max %d)\n",
+                       line_number, *scriptptr, MAXTILES-1);
+                error++;
+            }
 
             for(j=0;j<4;j++)
             {
@@ -1291,6 +1307,7 @@ uint8_t  parsecommand(int readfromGRP)
             {
                 printf("  * ERROR!(L%hd) Exceeded sound limit of %d.\n",line_number,NUM_SOUNDS);
                 error++;
+                k = NUM_SOUNDS - 1;  // clamp: prevent OOB write; slot is sacrificed but won't crash
             }
             scriptptr--;
             i = 0;
@@ -1588,13 +1605,15 @@ void loadefs(char  *filenam, char  *mptr, int readfromGRP)
     *script = (int32_t) scriptptr;
 
     if(warning|error)
-        printf("Found %hhd warning(s), '%c' error(s).\n",warning,error);
+        printf("Found %hhd warning(s), %hhd error(s).\n",warning,error);
 
     if(error)
     {
-		Error(EXIT_SUCCESS, "ERROR in CON(%s)\n", filenam);
+        // On embedded targets, CON errors are non-fatal for demo playback.
+        // Log and continue rather than calling exit().
+        printf("WARNING: CON(%s) had %d error(s), continuing anyway.\n", filenam, (int)error);
     }
-    else
+
     {
         total_lines += line_number;
         printf("Code Size:%d bytes(%d labels).\n",(int32_t)((scriptptr-script)<<2)-4,labelcnt);
@@ -1608,57 +1627,24 @@ void loadefs(char  *filenam, char  *mptr, int readfromGRP)
 			// FIX_00022: Automatically recognize the shareware grp (v1.3) + full version (1.3d) +
 			//            atomic (1.4/1.5 grp) and the con files version (either 1.3 or 1.4) (JonoF's idea)
 
+		// Version mismatch prompts removed for embedded target — no interactive console.
+		// Always reload from GRP to ensure CON files match the GRP version.
 		if(conVersion != 13 && (getGRPcrc32(0)==CRC_BASE_GRP_SHAREWARE_13 ||
 			getGRPcrc32(0)==CRC_BASE_GRP_FULL_13) && !getGRPcrc32(1))
 		{
-			printf(	"\nYou are trying to use a v1.3 Shareware/Full *.GRP with v1.4 or v1.5\n"
-					"external *.CON files. You may run in troubles by doing so and/or get\n"
-					"Out Of Synch errors. You can safely delete those files so xDuke will\n"
-					"always use the GRP internal CON files.\n"
-					"\nReload normal GRP internal *.CON files? (Y/N) : ");
-			do
-				kbdKey = getch() | ' ';
-			while(kbdKey != 'y' && kbdKey != 'n');
-			printf("%c\n", kbdKey);
-
-			if(kbdKey == 'y')
-			{
-				conVersion = 13;
-				loadefs(filenam, mptr, 1); // force GRP con files
-			}
+			printf("GRP/CON version mismatch (v1.3 GRP). Reloading CON from GRP.\n");
+			conVersion = 13;
+			loadefs(filenam, mptr, 1);
 		}
 		else if(conVersion != 15 && getGRPcrc32(0)==CRC_BASE_GRP_ATOMIC_15 && !getGRPcrc32(1))
 		{
-			printf(	"\nYou are trying to use a v1.5 ATOMIC *.GRP with v1.4 or v1.3\n"
-					"external *.CON files. You may run in troubles by doing so and/or get\n"
-					"Out Of Synch errors. You can safely delete those files so xDuke will\n"
-					"always use the GRP internal CON files.\n"
-					"\nReload normal GRP internal *.CON files? (Y/N) : ");
-			do
-				kbdKey = getch() | ' ';
-			while(kbdKey != 'y' && kbdKey != 'n');
-			printf("%c\n", kbdKey);
-
-			if(kbdKey == 'y')
-			{
-				loadefs(filenam, mptr, 1); // force GRP con files
-			}
-		}else if(conVersion != 14 && getGRPcrc32(0)==CRC_BASE_GRP_PLUTONIUM_14 && !getGRPcrc32(1))
+			printf("GRP/CON version mismatch (v1.5 Atomic GRP). Reloading CON from GRP.\n");
+			loadefs(filenam, mptr, 1);
+		}
+		else if(conVersion != 14 && getGRPcrc32(0)==CRC_BASE_GRP_PLUTONIUM_14 && !getGRPcrc32(1))
 		{
-			printf(	"\nYou are trying to use a v1.4 PLUTONIUM *.GRP with v1.3 or v1.5\n"
-					"external *.CON files. You may run in troubles by doing so and/or get\n"
-					"Out Of Synch errors. You can safely delete those files so xDuke will\n"
-					"always use the GRP internal CON files.\n"
-					"\nReload normal GRP internal *.CON files? (Y/N) : ");
-			do
-				kbdKey = getch() | ' ';
-			while(kbdKey != 'y' && kbdKey != 'n');
-			printf("%c\n", kbdKey);
-
-			if(kbdKey == 'y')
-			{
-				loadefs(filenam, mptr, 1); // force GRP con files
-			}
+			printf("GRP/CON version mismatch (v1.4 Plutonium GRP). Reloading CON from GRP.\n");
+			loadefs(filenam, mptr, 1);
 		}
 	}
 }

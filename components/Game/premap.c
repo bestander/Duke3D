@@ -322,20 +322,39 @@ void cacheit(void)
 
 void docacheit(void)
 {
-    int32_t i,j;
+    int32_t i, j, k;
 
     j = 0;
 
-    for(i=0;i<MAXTILES;i++)
-        if( (gotpic[i>>3]&(1<<(i&7))) && waloff[i] == NULL)
-    {
-        loadtile((short)i);
-        j++;
-        if((j&7) == 0) getpackets();
+    // Pass 1: load all map-referenced tiles (marked by cacheit via gotpic).
+    for (i = 0; i < MAXTILES; i++) {
+        if ((gotpic[i>>3] & (1<<(i&7))) && waloff[i] == NULL) {
+            loadtile((short)i);
+            j++;
+            if ((j&7) == 0) getpackets();
+        }
     }
 
-    clearbufbyte(gotpic,sizeof(gotpic),0L);
+    // Pass 2: load animation frames for every tile now in cache.
+    // animFlags bits 0-5 = frame count beyond base tile.
+    // The engine adds animateoffs() to picnum at render time, so those
+    // frame tiles must be resident or they cause mid-game SD reads.
+    for (i = 0; i < MAXTILES; i++) {
+        if (waloff[i] != NULL) {
+            int32_t nframes = tiles[i].animFlags & 63;
+            for (k = 1; k <= nframes && (i + k) < MAXTILES; k++) {
+                if (waloff[i + k] == NULL) {
+                    loadtile((short)(i + k));
+                    j++;
+                    if ((j & 7) == 0) getpackets();
+                }
+            }
+        }
+    }
 
+    clearbufbyte(gotpic, sizeof(gotpic), 0L);
+
+    printf("docacheit: loaded %d tiles total\n", j);
 }
 
 
