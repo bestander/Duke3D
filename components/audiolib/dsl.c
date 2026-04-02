@@ -1,258 +1,179 @@
+/*
+ * dsl.c — ESP32 audio driver for Duke3D Multivoc.
+ *
+ * Replaces the original SDL_OpenAudio-based driver with a FreeRTOS task that
+ * runs on Core 1 (same core as the game task) at lower priority (4 vs 5).
+ *
+ * Architecture:
+ *   A single audio task sleeps for ~23 ms (one buffer period at 11025 Hz /
+ *   256 samples) then:
+ *     1. Acquires a portMUX critical section to protect the voice list.
+ *     2. Calls MV_ServiceVoc() to mix one buffer.
+ *     3. Releases the critical section.
+ *     4. Calls platform_audio_write() — i2s_write with ticks_to_wait=0
+ *        (non-blocking; game task is never stalled waiting for I2S hardware).
+ *
+ *   During SD card reads the game task blocks on SPI DMA semaphores; the
+ *   audio task gets the CPU and delivers near-continuous audio.
+ *
+ *   DisableInterrupts / RestoreInterrupts use the same portMUX, so voice-list
+ *   mutations in MV_PlayVoice / MV_StopVoice are atomic with the mixing loop.
+ *   The portMUX supports nested Enter/Exit (same-core recursion).
+ */
+
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 
 #include "dsl.h"
-#include "util.h"
 
-#include "SDL.h"
-//#include "SDL_mixer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_log.h"
 
+/* MV_MixPage is incremented and mixed into by MV_ServiceVoc */
 extern volatile int MV_MixPage;
 
-static int DSL_ErrorCode = DSL_Ok;
+/* Declared extern to avoid pulling C++ esp32_hal.h into this C file.
+ * platform_audio_write is defined in esp32_hal.cpp as extern "C".       */
+extern void platform_audio_write(const int16_t *pcm, int n);
 
-static int mixer_initialized;
+static const char *TAG = "dsl";
 
-static void ( *_CallBackFunc )( void );
+/* portMUX serialises voice-list access between the audio task and the game
+ * task on Core 1.  Supports recursive Enter/Exit from the same core.    */
+static portMUX_TYPE g_audio_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static int   DSL_ErrorCode     = DSL_Ok;
+static void (*_CallBackFunc)(void);
 static volatile char *_BufferStart;
-static int _BufferSize;
-static int _NumDivisions;
-static int _SampleRate;
-static int _remainder;
+static int   _BufferSize;          /* bytes per mix page */
+static int   _SampleRate;
+static int   _mixer_initialized;
 
-//static Mix_Chunk *blank;
-static unsigned char *blank_buf;
+static TaskHandle_t g_audio_task  = NULL;
 
-static SDL_AudioCVT audio_cvt; // used for format conversion
+/* ------------------------------------------------------------------ */
 
-/*
-possible todo ideas: cache sdl/sdl mixer error messages.
-*/
-
-char *DSL_ErrorString( int ErrorNumber )
+char *DSL_ErrorString(int ErrorNumber)
 {
-	char *ErrorString;
-	
-	switch (ErrorNumber) {
-		case DSL_Warning:
-		case DSL_Error:
-			ErrorString = DSL_ErrorString(DSL_ErrorCode);
-			break;
-		
-		case DSL_Ok:
-			ErrorString = "SDL Driver ok.";
-			break;
-		
-		case DSL_SDLInitFailure:
-			ErrorString = "SDL Audio initialization failed.";
-			break;
-		
-		case DSL_MixerActive:
-			ErrorString = "SDL Mixer already initialized.";
-			break;	
-	
-		case DSL_MixerInitFailure:
-			ErrorString = "SDL Mixer initialization failed.";
-			break;
-			
-		default:
-			ErrorString = "Unknown SDL Driver error.";
-			break;
-	}
-	
-	return ErrorString;
+    switch (ErrorNumber) {
+    case DSL_Warning:
+    case DSL_Error:             return DSL_ErrorString(DSL_ErrorCode);
+    case DSL_Ok:                return "DSL ok.";
+    case DSL_SDLInitFailure:    return "DSL init failed.";
+    case DSL_MixerActive:       return "DSL already active.";
+    case DSL_MixerInitFailure:  return "DSL mixer init failed.";
+    default:                    return "Unknown DSL error.";
+    }
 }
 
-static void DSL_SetErrorCode(int ErrorCode)
+static void DSL_SetErrorCode(int code) { DSL_ErrorCode = code; }
+
+int DSL_Init(void)
 {
-	DSL_ErrorCode = ErrorCode;
+    DSL_SetErrorCode(DSL_Ok);
+    return DSL_Ok;
 }
 
-IRAM_ATTR void audio_cb( void *udata, unsigned char *stream, int len )
-//static void mixer_callback(int chan, void *stream, int len, void *udata)
+void DSL_Shutdown(void) { DSL_StopPlayback(); }
+
+/* ------------------------------------------------------------------ */
+/* Audio pump task                                                     */
+/* Core 1, priority 4 — below game task at priority 5.                */
+/* Runs when game task is blocked (SD reads, WiFi, vTaskDelay, etc.)  */
+/* ------------------------------------------------------------------ */
+
+static void audio_pump_task(void *arg)
 {
-	audio_cvt.buf = stream;
-	audio_cvt.len = len;
-		
-	Uint8 *stptr;
-	Uint8 *fxptr;
-	int copysize;
-	
-	/* len should equal _BufferSize, else this is screwed up */
+    (void)arg;
+    ESP_LOGI(TAG, "audio pump started (Core %d prio 4, buf %d bytes @ %d Hz)",
+             xPortGetCoreID(), _BufferSize, _SampleRate);
 
-	stptr = (Uint8 *)stream;
-	
-	if (_remainder > 0) {
-		copysize = min(len, _remainder);
-		
-		fxptr = (Uint8 *)(&_BufferStart[MV_MixPage * 
-			_BufferSize]);
-		
-		memcpy(stptr, fxptr+(_BufferSize-_remainder), copysize);
-		
-		len -= copysize;
-		_remainder -= copysize;
-		
-		stptr += copysize;
-	}
+    for (;;) {
+        /* Sleep one buffer period.  During this sleep the game task runs. */
+        vTaskDelay(pdMS_TO_TICKS(23));
 
-	while (len > 0) {
-		// new buffer 
-		
-		_CallBackFunc();
-		
-		fxptr = (Uint8 *)(&_BufferStart[MV_MixPage * 
-			_BufferSize]);
+        if (!_mixer_initialized || !_CallBackFunc || !_BufferStart)
+            continue;
 
-		copysize = min(len, _BufferSize);
-		
-		memcpy(stptr, fxptr, copysize);
-		
-		len -= copysize;
-		
-		stptr += copysize;
-	}
-	
-	_remainder = len;
+        /* Critical section: prevents game task from preempting us mid-
+         * iteration of the voice linked list (same-core, nested-safe).  */
+        portENTER_CRITICAL(&g_audio_mux);
+        _CallBackFunc();   /* MV_ServiceVoc: increments MV_MixPage, mixes */
+        portEXIT_CRITICAL(&g_audio_mux);
 
-
-	SDL_ConvertAudio(&audio_cvt);
-	
+        /* Push the freshly-mixed page; non-blocking (ticks=0). */
+        const int16_t *buf =
+            (const int16_t *)(_BufferStart + MV_MixPage * _BufferSize);
+        platform_audio_write(buf, _BufferSize / (int)sizeof(int16_t));
+    }
 }
 
-int DSL_Init( void )
-{
-	DSL_SetErrorCode(DSL_Ok);
-	
-	if (SDL_InitSubSystem(SDL_INIT_AUDIO|SDL_INIT_NOPARACHUTE) < 0) {
-		DSL_SetErrorCode(DSL_SDLInitFailure);
-		
-		return DSL_Error;
-	}
-	
+/* ------------------------------------------------------------------ */
 
-	
-	return DSL_Ok;
+int DSL_BeginBufferedPlayback(char *BufferStart, int BufferSize, int NumDivisions,
+                               unsigned SampleRate, int MixMode,
+                               void (*CallBackFunc)(void))
+{
+    if (_mixer_initialized) {
+        DSL_SetErrorCode(DSL_MixerActive);
+        return DSL_Error;
+    }
+
+    /* BufferSize / NumDivisions = MV_BufferSize = MixBufferSize * MV_SampleSize,
+     * which is already in bytes and already accounts for bit depth and channels.
+     * Do NOT multiply by sample_bytes/channels again — that double-counts and
+     * produces a 2× buffer size, causing reads across page boundaries and
+     * high-frequency garbage on the I2S output.                             */
+    _CallBackFunc  = CallBackFunc;
+    _BufferStart   = BufferStart;
+    _BufferSize    = BufferSize / NumDivisions;  /* bytes per mix page */
+    _SampleRate    = (int)SampleRate;
+
+    ESP_LOGI(TAG, "DSL_BeginBufferedPlayback rate=%u mode=0x%x pages=%d buf=%d B",
+             SampleRate, MixMode, NumDivisions, _BufferSize);
+
+    if (xTaskCreatePinnedToCore(audio_pump_task, "duke_audio",
+                                4096, NULL, 4, &g_audio_task, 1) != pdPASS) {
+        ESP_LOGE(TAG, "failed to create audio pump task");
+        DSL_SetErrorCode(DSL_MixerInitFailure);
+        return DSL_Error;
+    }
+
+    _mixer_initialized = 1;
+    return DSL_Ok;
 }
 
-void DSL_Shutdown( void )
+void DSL_StopPlayback(void)
 {
-	DSL_StopPlayback();
+    _mixer_initialized = 0;
+    if (g_audio_task) {
+        vTaskDelete(g_audio_task);
+        g_audio_task = NULL;
+    }
 }
 
-int   DSL_BeginBufferedPlayback( char *BufferStart,
-      int BufferSize, int NumDivisions, unsigned SampleRate,
-      int MixMode, void ( *CallBackFunc )( void ) )
+unsigned DSL_GetPlaybackRate(void) { return (unsigned)_SampleRate; }
+
+/* ------------------------------------------------------------------ */
+/* DisableInterrupts / RestoreInterrupts                               */
+/*                                                                     */
+/* On DOS these masked the hardware timer ISR that calls MV_ServiceVoc,*/
+/* making voice-list mutations atomic.  Here we use the same portMUX   */
+/* as the audio pump task's critical section.  When the game task holds*/
+/* the mux (during MV_PlayVoice / MV_StopVoice), the audio task's     */
+/* portENTER_CRITICAL cannot run concurrently on the same core.        */
+/* ------------------------------------------------------------------ */
+
+uint32_t DisableInterrupts(void)
 {
-	Uint16 format;
-	int channels;
-	int chunksize;
-	int blah;
-		
-	if (mixer_initialized) {
-		DSL_SetErrorCode(DSL_MixerActive);
-		
-		return DSL_Error;
-	}
-	
-	_CallBackFunc = CallBackFunc;
-	_BufferStart = BufferStart;
-	_BufferSize = (BufferSize / NumDivisions);
-	_NumDivisions = NumDivisions;
-	_SampleRate = SampleRate;
-
-	_remainder = 0;
-	
-	//format = (MixMode & SIXTEEN_BIT) ? AUDIO_S16LSB : AUDIO_U8;
-	channels = (MixMode & STEREO) ? 2 : 1;
-
- /*
-	I find 50ms to be ideal, at least with my hardware. This clamping mechanism
-	was added because it seems the above remainder handling isn't so nice --kode54
- */
-	chunksize = (5 * SampleRate) / 100;
-
-	blah = _BufferSize;
-	if (MixMode & SIXTEEN_BIT) blah >>= 1;
-	if (MixMode & STEREO) blah >>= 1;
-
-	if (chunksize % blah) chunksize += blah - (chunksize % blah);
-
-	//if (Mix_OpenAudio(SampleRate, format, channels, chunksize) < 0) {
-	//	DSL_SetErrorCode(DSL_MixerInitFailure);
-		
-	//	return DSL_Error;
-	//}
-
-/*
-	Mix_SetPostMix(mixer_callback, NULL);
-*/
-	/* have to use a channel because postmix will overwrite the music... */
-	//Mix_RegisterEffect(0, mixer_callback, NULL, NULL);
-	
-	/* create a dummy sample just to allocate that channel */
-	//blank_buf = (Uint8 *)malloc(4096);
-	//memset(blank_buf, 0, 4096);
-	
-	//blank = Mix_QuickLoad_RAW(blank_buf, 4096);
-		
-	//Mix_PlayChannel(0, blank, -1);
-	
-	SDL_AudioSpec desired;
-    SDL_AudioSpec obtained;
-
-	desired.freq = 44000;
-	desired.format = AUDIO_S16SYS; //: AUDIO_S8;
-	desired.channels = 1;
-	desired.samples = 2048;
-	desired.callback = audio_cb;
-
-    SDL_OpenAudio(&desired, &obtained);
-
-	SDL_BuildAudioCVT(&audio_cvt, desired.format, desired.channels, desired.freq, obtained.format, obtained.channels, obtained.freq);
-	
-	SDL_PauseAudio(0); // unpause
-
-	mixer_initialized = 1;
-	
-	return DSL_Ok;
+    portENTER_CRITICAL(&g_audio_mux);
+    return 0;
 }
 
-void DSL_StopPlayback( void )
+void RestoreInterrupts(uint32_t flags)
 {
-	if (mixer_initialized) {
-		//Mix_HaltChannel(0);
-	}
-	
-	//if (blank != NULL) {
-		//Mix_FreeChunk(blank);
-	//}
-	
-	//blank = NULL;
-	
-	if (blank_buf  != NULL) {
-		free(blank_buf);
-	}
-	
-	blank_buf = NULL;
-	
-	if (mixer_initialized) {
-		//Mix_CloseAudio();
-	}
-	
-	mixer_initialized = 0;
-}
-
-unsigned DSL_GetPlaybackRate( void )
-{
-	return _SampleRate;
-}
-
-uint32_t DisableInterrupts( void )
-{
-	return 0;
-}
-
-void RestoreInterrupts( uint32_t flags )
-{
+    (void)flags;
+    portEXIT_CRITICAL(&g_audio_mux);
 }

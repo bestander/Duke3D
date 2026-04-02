@@ -362,7 +362,9 @@ int loadpics(char  *filename, char * gamedir)
     clearbuf(gotpic,(MAXTILES+31)>>5,0L);
 
     // Allocate art cache from PSRAM — internal DRAM is fragmented after WiFi/SD/HUB75.
-    cachesize = 512 * 1024;
+    // Cap at 256KB: sounds now live in a separate PSRAM heap pool (loadsound/clearsoundlocks
+    // in sounds.c use heap_caps_malloc). Leaving ~200KB+ PSRAM heap free for sound buffers.
+    cachesize = 256 * 1024;
     while ((pic = (uint8_t*)heap_caps_malloc(cachesize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)) == NULL)
     {
         cachesize -= 64 * 1024;

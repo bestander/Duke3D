@@ -28,6 +28,10 @@ Prepared for public release: 03/21/2003 - Charlie Wiederhold, 3D Realms
 #include <conio.h>
 #endif
 
+#ifndef PLATFORM_DOS
+#include "esp_heap_caps.h"
+#endif
+
 #include <stdio.h>
 #include <string.h>
 #include "types.h"
@@ -282,9 +286,16 @@ uint8_t  loadsound(uint16_t num)
     l = kfilelength( fp );
     soundsiz[num] = l;
 
-    Sound[num].lock = 200;
+    /* Allocate from PSRAM heap — keeps sound data out of the tile cache. */
+    Sound[num].ptr = (uint8_t *)heap_caps_malloc((size_t)l,
+                                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!Sound[num].ptr)
+    {
+        kclose(fp);
+        return 0;   /* OOM — sound skipped silently */
+    }
+    Sound[num].lock = 1;  /* nominal; no longer a tile-cache lock */
 
-    allocache(&Sound[num].ptr,l,(uint8_t  *)&Sound[num].lock);
     kread( fp, Sound[num].ptr , l);
     kclose( fp );
     return 1;
@@ -652,15 +663,21 @@ void testcallback(uint32_t num)
 void clearsoundlocks(void)
 {
     int32_t i;
-    
-   
 
     for(i=0;i<NUM_SOUNDS;i++)
- 
-            Sound[i].lock = 199;
+    {
+        /* Free PSRAM-allocated sound buffers that are not currently playing.
+         * num > 0 means at least one active voice is streaming from ptr — keep those.
+         * Next play will reload from SD via loadsound() when ptr == 0. */
+        if (Sound[i].ptr != 0 && Sound[i].num == 0)
+        {
+            heap_caps_free(Sound[i].ptr);
+            Sound[i].ptr = 0;
+        }
+        Sound[i].lock = 199;
+    }
 
     for(i=0;i<11;i++)
- 
-            lumplockbyte[i] = 199;
+        lumplockbyte[i] = 199;
 }
 

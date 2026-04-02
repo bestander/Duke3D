@@ -216,20 +216,20 @@ void CONFIG_SetDefaults( void )
 {
    // sound
    SoundToggle = 1;
-   MusicToggle = 1;
+   MusicToggle = 0;         /* music disabled: OPL2/MIDI not ported */
    VoiceToggle = 1;
    AmbienceToggle = 1;
    OpponentSoundToggle = 1;
-   FXVolume = 64;
-   MusicVolume = 64;
+   FXVolume = 25;           /* 10% of 255 */
+   MusicVolume = 0;
    FXDevice = SoundScape;
-   MusicDevice = -1;
+   MusicDevice = NumSoundCards;  /* NumSoundCards = disabled */
    ReverseStereo = 0;
    
-   NumVoices = 32;
+   NumVoices = 8;   /* cap at 8 voices — PSRAM budget ~275 KB */
    NumChannels = 1;
    NumBits = 16;
-   MixRate = 11000;
+   MixRate = 11025;
 
    // mouse
    mouseSensitivity_X = 16;
@@ -731,13 +731,13 @@ void CONFIG_ReadSetup( void )
    SCRIPT_GetNumber( scripthandle, "Sound Setup", "AmbienceToggle",&AmbienceToggle);
    SCRIPT_GetNumber( scripthandle, "Sound Setup", "OpponentSoundToggle",&OpponentSoundToggle);   
    SCRIPT_GetNumber( scripthandle, "Sound Setup", "NumVoices",&NumVoices);
-   NumVoices = 32;
+   NumVoices = 8;   /* cap at 8 voices — PSRAM budget ~275 KB */
    SCRIPT_GetNumber( scripthandle, "Sound Setup", "NumChannels",&NumChannels);
    NumChannels = 1;
    SCRIPT_GetNumber( scripthandle, "Sound Setup", "NumBits",&NumBits);
    NumBits = 16;
    SCRIPT_GetNumber( scripthandle, "Sound Setup", "MixRate",&MixRate);
-   MixRate = 11000;
+   MixRate = 11025;
    SCRIPT_GetNumber( scripthandle, "Sound Setup", "MidiPort",&MidiPort);
    SCRIPT_GetNumber( scripthandle, "Sound Setup", "BlasterAddress",&dummy);
    BlasterConfig.Address = dummy;
