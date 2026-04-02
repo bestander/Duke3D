@@ -33,6 +33,8 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <errno.h>
+#include <sys/types.h>
 
 #ifdef PLAT_DOS
 #include <dos.h>
@@ -127,7 +129,7 @@ static VoiceNode *MV_Voices = NULL;
 static volatile VoiceNode VoiceList;
 static volatile VoiceNode VoicePool;
 
-/*static*/ int MV_MixPage      = 0;
+volatile int MV_MixPage      = 0;
 static int MV_VoiceHandle  = MV_MinVoiceHandle;
 
 static void ( *MV_CallBackFunc )( unsigned long ) = NULL;
@@ -286,7 +288,7 @@ char *MV_ErrorString
    Mixes the sound into the buffer.
 ---------------------------------------------------------------------*/
 
-IRAM_ATTR static void MV_Mix( VoiceNode *voice )
+static void MV_Mix( VoiceNode *voice )
 {
    uint8_t        *start;
    int            length;
@@ -441,7 +443,7 @@ IRAM_ATTR void MV_StopVoice( VoiceNode *voice )
 
 // static int backcolor = 1;
 
-IRAM_ATTR void MV_ServiceVoc
+void MV_ServiceVoc
 (
  void
  )
@@ -466,6 +468,8 @@ IRAM_ATTR void MV_ServiceVoc
 	// Play any waiting voices
 	for( voice = VoiceList.next; voice != &VoiceList; voice = next )
 	{
+		next = voice->next;
+
 		//      if ( ( voice < &MV_Voices[ 0 ] ) || ( voice > &MV_Voices[ 8 ] ) )
 		//         {
 		//         SetBorderColor(backcolor++);
@@ -475,18 +479,16 @@ IRAM_ATTR void MV_ServiceVoc
 		if(NULL == voice->GetSound)
 		{
 			#ifdef _DEBUG
-				printf("MV_ServiceVoc() voice->GetSound == NULL, break;\n");
+				printf("MV_ServiceVoc() voice->GetSound == NULL, continue;\n");
 			#endif
 
-			// This sound is null, early out, or face a nasty crash.
-			break;		
+			/* Skip this node only; breaking would silence every lower-priority voice. */
+			continue;
 		}
 		
 		MV_BufferEmpty[ MV_MixPage ] = FALSE;
 		
 		MV_MixFunction( voice );
-	
-		next = voice->next;
 		
 		// Is this voice done?
 		if ( !voice->Playing )
@@ -922,6 +924,437 @@ IRAM_ATTR playbackstatus MV_GetNextWAVBlock
    return( KeepPlaying );
    }
 
+
+/*---------------------------------------------------------------------
+   SD-streaming voice support (ESP32 only)
+   -----------------------------------------------------------------------
+   No sound data lives in PSRAM.  Each voice holds a GRP byte offset;
+   MV_PrefetchStreams() fills the *inactive* 2 KiB half of a 4 KiB
+   ping-pong buffer before the mix period (the active half is still being
+   mixed); MV_GetNextStreamBlock() swaps halves with no I/O.
+
+   Half size is MV_STREAM_HALF bytes (4096).  At 8000 Hz each half covers
+   ~512 ms; two halves ≈ 1 s pre-buffered, improving survival of long SD
+   stalls when many streams compete for the GRP mutex.  Short sounds
+   (< 2×MV_STREAM_HALF bytes) are fully filled at voice start so no prefetch
+   reads are needed during playback.
+
+   8 voices × 2 × MV_STREAM_HALF = 64 KB PSRAM (see MV_Init stream_buf).
+---------------------------------------------------------------------*/
+
+/* Size of each ping-pong half in bytes.  Must be a power of two.  Larger
+ * halves reduce underruns when the game task monopolizes SD/SPI for tiles. */
+#define MV_STREAM_HALF 4096
+
+#ifndef PLATFORM_DOS
+#include "mv_stream.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+
+static const char *MV_STREAM_TAG = "mv_stream";
+static uint32_t g_stream_underruns;
+static uint32_t g_stream_prefetch_short;
+#define MV_PREFETCH_MAX_JOBS 16
+
+/* Forward declarations for functions defined later in this file. */
+static VoiceNode *MV_AllocVoice( int priority );
+static void       MV_SetVoicePitch( VoiceNode *voice, unsigned long rate, int pitchoffset );
+static void       MV_SetVoiceVolume( VoiceNode *voice, int vol, int left, int right );
+
+/* Path to DUKE3D.GRP; one shared FILE* for prefetch + init reads (mutex-serialized). */
+static char              g_grp_stream_path[ 128 ];
+static FILE             *g_grp_stream_fp   = NULL;
+static SemaphoreHandle_t g_grp_stream_mtx  = NULL;
+
+static void mv_close_grp_stream_unlocked( void )
+{
+   if ( g_grp_stream_fp )
+      {
+      fclose( g_grp_stream_fp );
+      g_grp_stream_fp = NULL;
+      }
+}
+
+void MV_OpenGRPStream( const char *grp_path )
+{
+   if ( grp_path == NULL || grp_path[ 0 ] == '\0' )
+      {
+      g_grp_stream_path[ 0 ] = '\0';
+      ESP_LOGE( MV_STREAM_TAG, "MV_OpenGRPStream: empty path" );
+      return;
+      }
+   strncpy( g_grp_stream_path, grp_path, sizeof( g_grp_stream_path ) - 1 );
+   g_grp_stream_path[ sizeof( g_grp_stream_path ) - 1 ] = '\0';
+
+   if ( g_grp_stream_mtx == NULL )
+      g_grp_stream_mtx = xSemaphoreCreateMutex();
+
+   if ( g_grp_stream_mtx == NULL )
+      {
+      ESP_LOGE( MV_STREAM_TAG, "MV_OpenGRPStream: mutex create failed" );
+      return;
+      }
+
+   if ( xSemaphoreTake( g_grp_stream_mtx, pdMS_TO_TICKS( 5000 ) ) != pdTRUE )
+      {
+      ESP_LOGE( MV_STREAM_TAG, "MV_OpenGRPStream: mutex timeout" );
+      return;
+      }
+
+   mv_close_grp_stream_unlocked();
+   g_grp_stream_fp = fopen( g_grp_stream_path, "rb" );
+   xSemaphoreGive( g_grp_stream_mtx );
+
+   if ( !g_grp_stream_fp )
+      ESP_LOGE( MV_STREAM_TAG, "cannot open GRP for streaming: %s", g_grp_stream_path );
+   else
+      ESP_LOGD( MV_STREAM_TAG, "GRP stream ok (shared FILE* + mutex): %s", g_grp_stream_path );
+}
+
+/* Serialized read at absolute GRP byte offset — used by prefetch and play_sound_stream. */
+int MV_GrpStreamReadAt( int64_t abs_off, void *buf, size_t len )
+{
+   if ( g_grp_stream_path[ 0 ] == '\0' || buf == NULL || len == 0 )
+      return -1;
+   if ( g_grp_stream_mtx == NULL )
+      return -1;
+
+   if ( xSemaphoreTake( g_grp_stream_mtx, pdMS_TO_TICKS( 30000 ) ) != pdTRUE )
+      {
+      ESP_LOGW( MV_STREAM_TAG, "MV_GrpStreamReadAt: mutex timeout off=%lld",
+                (long long)abs_off );
+      return -1;
+      }
+
+   if ( !g_grp_stream_fp )
+      g_grp_stream_fp = fopen( g_grp_stream_path, "rb" );
+
+   int out = -1;
+   if ( g_grp_stream_fp )
+      {
+      if ( fseeko( g_grp_stream_fp, (off_t)abs_off, SEEK_SET ) != 0 )
+         {
+         ESP_LOGW( MV_STREAM_TAG,
+                   "GRP fseeko errno=%d %s off=%lld — reopen",
+                   errno, strerror( errno ), (long long)abs_off );
+         mv_close_grp_stream_unlocked();
+         g_grp_stream_fp = fopen( g_grp_stream_path, "rb" );
+         if ( !g_grp_stream_fp || fseeko( g_grp_stream_fp, (off_t)abs_off, SEEK_SET ) != 0 )
+            out = -1;
+         else
+            out = (int)fread( buf, 1, len, g_grp_stream_fp );
+         }
+      else
+         out = (int)fread( buf, 1, len, g_grp_stream_fp );
+      }
+
+   xSemaphoreGive( g_grp_stream_mtx );
+   return out;
+}
+
+void MV_CloseGRPStream( void )
+{
+   if ( g_grp_stream_mtx == NULL )
+      return;
+   if ( xSemaphoreTake( g_grp_stream_mtx, pdMS_TO_TICKS( 5000 ) ) != pdTRUE )
+      return;
+   mv_close_grp_stream_unlocked();
+   xSemaphoreGive( g_grp_stream_mtx );
+   vSemaphoreDelete( g_grp_stream_mtx );
+   g_grp_stream_mtx = NULL;
+   g_grp_stream_path[ 0 ] = '\0';
+}
+
+uint32_t MV_StreamUnderrunTotal( void )
+{
+   return g_stream_underruns;
+}
+
+uint32_t MV_StreamPrefetchShortTotal( void )
+{
+   return g_stream_prefetch_short;
+}
+
+/* Pre-fetch next MV_STREAM_HALF-byte chunk for streaming voices.
+ *
+ * Unsafe pattern (removed): walk VoiceList without the audio lock, then fread
+ * (may yield). The game task could stop the voice and recycle the VoiceNode in
+ * that window; prefetch then corrupted stream_pos / half_ready on the wrong
+ * slot or a pooled node — mixer sees empty halves or garbage → underruns and
+ * silent output despite MV_PlayStream succeeding.
+ *
+ * Safe pattern: snapshot jobs under DisableInterrupts (same portMUX as
+ * MV_PlayVoice), perform SD reads into a temp buffer, then apply only if the
+ * voice is still on the list and all stream fields match the snapshot. */
+void MV_PrefetchStreams( void )
+{
+   typedef struct
+      {
+      int       handle;
+      int32_t   grp_off;
+      int32_t   pos;
+      int32_t   total;
+      uint8_t   active;
+      int32_t   r0;
+      int32_t   r1;
+      uint8_t  *buf;
+      int       inactive_half;
+      int32_t   chunk;
+      } PrefetchJob;
+
+   PrefetchJob jobs[ MV_PREFETCH_MAX_JOBS ];
+   int         njobs = 0;
+   VoiceNode  *v;
+   unsigned long flags;
+
+   if ( g_grp_stream_path[ 0 ] == '\0' ) return;
+
+   flags = DisableInterrupts();
+   for ( v = VoiceList.next; v != &VoiceList && njobs < MV_PREFETCH_MAX_JOBS;
+         v = v->next )
+      {
+      int ina;
+
+      if ( v->wavetype != Stream || v->stream_buf == NULL )
+         continue;
+
+      ina = 1 - ( (int)v->stream_active & 1 );
+      if ( v->stream_half_ready[ ina & 1 ] > 0 )
+         continue;
+      if ( v->stream_pos >= v->stream_total_len )
+         continue;
+
+      {
+      int32_t remain = v->stream_total_len - v->stream_pos;
+      int32_t chunk  = remain > MV_STREAM_HALF ? MV_STREAM_HALF : remain;
+      if ( chunk <= 0 )
+         continue;
+
+      jobs[ njobs ].handle        = v->handle;
+      jobs[ njobs ].grp_off      = v->stream_grp_offset;
+      jobs[ njobs ].pos          = v->stream_pos;
+      jobs[ njobs ].total        = v->stream_total_len;
+      jobs[ njobs ].active       = v->stream_active;
+      jobs[ njobs ].r0           = v->stream_half_ready[ 0 ];
+      jobs[ njobs ].r1           = v->stream_half_ready[ 1 ];
+      jobs[ njobs ].buf          = v->stream_buf;
+      jobs[ njobs ].inactive_half = ina & 1;
+      jobs[ njobs ].chunk        = chunk;
+      njobs++;
+      }
+      }
+   RestoreInterrupts( flags );
+
+   for ( int j = 0; j < njobs; j++ )
+      {
+      PrefetchJob *job = &jobs[ j ];
+      int64_t      abs_off =
+         (int64_t)job->grp_off + (int64_t)job->pos;
+      static uint8_t tmp[ MV_STREAM_HALF ];  /* static: audio task stack is only 4 KB */
+      int32_t      got;
+      VoiceNode   *w;
+
+      if ( job->chunk > MV_STREAM_HALF )
+         continue;
+
+      got = (int32_t)MV_GrpStreamReadAt( abs_off, tmp, (size_t)job->chunk );
+      if ( got < 0 )
+         {
+         ESP_LOGE( MV_STREAM_TAG,
+                   "prefetch read fail handle=%d spos=%ld grp_off=%ld",
+                   job->handle, (long)job->pos, (long)job->grp_off );
+         continue;
+         }
+      if ( got < job->chunk && got < ( job->total - job->pos ) )
+         g_stream_prefetch_short++;
+
+      if ( got <= 0 )
+         {
+         if ( job->chunk > 0 )
+            ESP_LOGW( MV_STREAM_TAG, "prefetch fread=0 handle=%d want=%ld",
+                      job->handle, (long)job->chunk );
+         continue;
+         }
+
+      flags = DisableInterrupts();
+      for ( w = VoiceList.next; w != &VoiceList; w = w->next )
+         {
+         int ih = job->inactive_half;
+
+         if ( w->wavetype != Stream )
+            continue;
+         if ( w->handle != job->handle )
+            continue;
+         if ( w->stream_buf != job->buf )
+            continue;
+         if ( w->stream_grp_offset != job->grp_off )
+            continue;
+         if ( w->stream_pos != job->pos )
+            continue;
+         if ( w->stream_total_len != job->total )
+            continue;
+         if ( w->stream_active != job->active )
+            continue;
+         if ( w->stream_half_ready[ 0 ] != job->r0
+              || w->stream_half_ready[ 1 ] != job->r1 )
+            break;   /* state changed — another writer or mixer; drop */
+         if ( w->stream_half_ready[ ih ] != 0 )
+            break;   /* already filled */
+
+         memcpy( w->stream_buf + (unsigned)ih * MV_STREAM_HALF, tmp, (size_t)got );
+         w->stream_pos += got;
+         w->stream_half_ready[ ih ] = got;
+         break;
+         }
+      RestoreInterrupts( flags );
+      }
+}
+
+/* GetSound callback for streaming voices.  No I/O; runs inside portMUX.
+ * Never call ESP_LOG/printf here — same core as audio pump critical section. */
+static playbackstatus MV_GetNextStreamBlock( VoiceNode *voice )
+{
+   int act = (int)voice->stream_active & 1;
+   int nxt = 1 - act;
+
+   /* First fetch: length==0 — either init chunk in stream_half_ready[act], or failure. */
+   if ( voice->length == 0 )
+      {
+      if ( voice->stream_half_ready[ act ] > 0 )
+         {
+         voice->sound   = voice->stream_buf + act * MV_STREAM_HALF;
+         voice->length  = (unsigned long)voice->stream_half_ready[ act ] << 16;
+         voice->stream_half_ready[ act ] = 0;
+         return KeepPlaying;
+         }
+      voice->Playing = FALSE;
+      /* Do not ESP_LOG here: MV_GetNextStreamBlock runs inside portMUX via MV_Mix;
+       * esp_log/stdio uses locks and abort()s when called from that context. */
+      return NoMoreData;
+      }
+
+   /* Advance to next prefetched half. */
+   voice->position -= voice->length;
+   if ( voice->stream_half_ready[ nxt ] <= 0 )
+      {
+      g_stream_underruns++;
+      /* Same as above — no logging under audio critical section; underrun total
+       * is readable via MV_StreamUnderrunTotal() for host diagnostics. */
+      voice->Playing = FALSE;
+      return NoMoreData;
+      }
+
+   voice->stream_active = (uint8_t)nxt;
+   act = nxt;
+   voice->sound   = voice->stream_buf + act * MV_STREAM_HALF;
+   voice->length  = (unsigned long)voice->stream_half_ready[ act ] << 16;
+   voice->stream_half_ready[ act ] = 0;
+
+   return KeepPlaying;
+}
+
+/* Start a streaming voice (internal — called by MV_PlayStream3D). */
+static int MV_PlayStream( int32_t grp_pcm_offset, int32_t pcm_total_len,
+                           unsigned rate,
+                           uint8_t *init_buf, int32_t init_len,
+                           int pitch, int vol, int left, int right,
+                           int priority, unsigned long callbackval )
+{
+   VoiceNode *voice;
+
+   if ( !MV_Installed )
+      { MV_SetErrorCode( MV_NotInstalled ); return MV_Error; }
+
+   voice = MV_AllocVoice( priority );
+   if ( !voice )
+      { MV_SetErrorCode( MV_NoVoices ); return MV_Error; }
+
+   voice->wavetype    = Stream;
+   voice->bits        = 8;
+   voice->GetSound    = MV_GetNextStreamBlock;
+   voice->Playing     = TRUE;
+   voice->priority    = priority;
+   voice->callbackval = callbackval;
+   voice->LoopStart   = NULL;
+   voice->LoopEnd     = NULL;
+   voice->BlockLength = 0;
+   voice->NextBlock   = NULL;
+   voice->position    = 0;
+   voice->length      = 0;
+   voice->GLast       = -1;
+   voice->GPos        = 0;
+   voice->GVal[0] = voice->GVal[1] = voice->GVal[2] = voice->GVal[3] = 0;
+
+   voice->stream_grp_offset = grp_pcm_offset;
+   voice->stream_total_len  = pcm_total_len;
+   voice->stream_pos        = 0;
+   voice->stream_half_ready[ 0 ] = 0;
+   voice->stream_half_ready[ 1 ] = 0;
+   voice->stream_active     = 0;
+
+   /* Install initial buffer so the very first mix period has data (half 0). */
+   if ( init_buf && init_len > 0 && voice->stream_buf )
+      {
+      int32_t copy = init_len > MV_STREAM_HALF ? MV_STREAM_HALF : init_len;
+      memcpy( voice->stream_buf, init_buf, (size_t)copy );
+      voice->stream_half_ready[ 0 ] = copy;
+      voice->stream_pos             = copy;
+      }
+
+   /* Pre-fill inactive half (1) before the voice is on the list.
+    * With MV_STREAM_HALF=4096, short sounds (< 8192 bytes total) are fully
+    * buffered here — no prefetch SD reads required during playback. */
+   if ( voice->stream_buf && voice->stream_half_ready[ 0 ] > 0 &&
+        voice->stream_pos < voice->stream_total_len )
+      {
+      int32_t remain = voice->stream_total_len - voice->stream_pos;
+      int32_t chunk  = remain > MV_STREAM_HALF ? MV_STREAM_HALF : remain;
+      int64_t abs_off = (int64_t)voice->stream_grp_offset + (int64_t)voice->stream_pos;
+      int32_t got = (int32_t)MV_GrpStreamReadAt( abs_off,
+                                                 voice->stream_buf + MV_STREAM_HALF,
+                                                 (size_t)chunk );
+      if ( got > 0 )
+         {
+         voice->stream_pos += got;
+         voice->stream_half_ready[ 1 ] = got;
+         }
+      }
+
+   MV_SetVoicePitch( voice, rate, pitch );
+   MV_SetVoiceVolume( voice, vol, left, right );
+   MV_PlayVoice( voice );
+
+   return voice->handle;
+}
+
+int MV_PlayStream3D( int32_t grp_pcm_offset, int32_t pcm_total_len,
+                     unsigned rate,
+                     uint8_t *init_buf, int32_t init_len,
+                     int pitch, int angle, int distance,
+                     int priority, unsigned long callbackval )
+{
+   int left, right, mid, volume;
+
+   if ( !MV_Installed )
+      { MV_SetErrorCode( MV_NotInstalled ); return MV_Error; }
+
+   if ( distance < 0 )
+      { distance = -distance; angle += MV_NumPanPositions / 2; }
+
+   volume = MIX_VOLUME( distance );
+   angle &= MV_MaxPanPosition;
+   left   = MV_PanTable[ angle ][ volume ].left;
+   right  = MV_PanTable[ angle ][ volume ].right;
+   mid    = max( 0, 255 - distance );
+
+   return MV_PlayStream( grp_pcm_offset, pcm_total_len, rate,
+                         init_buf, init_len,
+                         pitch, mid, left, right, priority, callbackval );
+}
+
+#endif /* PLATFORM_DOS */
 
 /*---------------------------------------------------------------------
    Function: MV_ServiceRecord
@@ -2970,6 +3403,30 @@ printf("MV_Init card: %d, rate: %d, voices: %d, channels: %d, bits: %d\n", sound
       LL_Add( &VoicePool, &MV_Voices[ index ], next, prev );
       }
 
+#ifndef PLATFORM_DOS
+   /* Ping-pong per voice (2 × MV_STREAM_HALF): prefer PSRAM so bulk stays out
+    * of internal heap, leaving room for xTaskCreatePinnedToCore
+    * (audio task stack + TCB must be in internal RAM).  Fall back to internal
+    * only if PSRAM is unavailable.                                           */
+   for( index = 0; index < Voices; index++ )
+      {
+      uint8_t *sb = (uint8_t *)heap_caps_malloc(
+         2 * MV_STREAM_HALF, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT );
+      if ( !sb )
+         sb = (uint8_t *)heap_caps_malloc(
+            2 * MV_STREAM_HALF, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT );
+      MV_Voices[ index ].stream_buf = sb;
+      if ( !MV_Voices[ index ].stream_buf )
+         {
+         ESP_LOGE( MV_STREAM_TAG, "MV_Init: stream_buf OOM voice slot %d", index );
+         }
+      MV_Voices[ index ].stream_half_ready[ 0 ] = 0;
+      MV_Voices[ index ].stream_half_ready[ 1 ] = 0;
+      MV_Voices[ index ].stream_active          = 0;
+      MV_Voices[ index ].stream_pos             = 0;
+      }
+#endif
+
    // Allocate mix buffer within 1st megabyte
    status = DPMI_GetDOSMemory( ( void ** )&ptr, &MV_BufferDescriptor,
       2 * TotalBufferSize);
@@ -3243,6 +3700,21 @@ int MV_Shutdown
    MV_FooMemory = 0;
 
    DPMI_UnlockMemory( MV_Voices, MV_TotalMemory );
+#ifndef PLATFORM_DOS
+   /* Free ping-pong stream buffers before the voice array itself. */
+   if ( MV_Voices )
+      {
+      int si;
+      for ( si = 0; si < MV_MaxVoices; si++ )
+         {
+         if ( MV_Voices[ si ].stream_buf )
+            {
+            heap_caps_free( MV_Voices[ si ].stream_buf );
+            MV_Voices[ si ].stream_buf = NULL;
+            }
+         }
+      }
+#endif
    USRHOOKS_FreeMem( MV_Voices );
    MV_Voices      = NULL;
    MV_TotalMemory = 0;
@@ -3251,6 +3723,10 @@ int MV_Shutdown
    LL_Reset( &VoicePool, next, prev );
 
    MV_MaxVoices = 1;
+
+#ifndef PLATFORM_DOS
+   MV_CloseGRPStream();
+#endif
 
    // Release the descriptor from our mix buffer
    DPMI_FreeDOSMemory( MV_BufferDescriptor );

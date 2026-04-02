@@ -5,13 +5,14 @@
  * runs on Core 1 (same core as the game task) at lower priority (4 vs 5).
  *
  * Architecture:
- *   A single audio task sleeps for ~23 ms (one buffer period at 11025 Hz /
- *   256 samples) then:
- *     1. Acquires a portMUX critical section to protect the voice list.
- *     2. Calls MV_ServiceVoc() to mix one buffer.
- *     3. Releases the critical section.
- *     4. Calls platform_audio_write() — i2s_write with ticks_to_wait=0
- *        (non-blocking; game task is never stalled waiting for I2S hardware).
+ *   A single audio task on Core 0 wakes each buffer period using vTaskDelayUntil
+ *   (period = samples_per_buffer * 1000 / sample_rate ms) so cadence tracks MixRate
+ *   and does not drift. Then:
+ *     1. Pre-fetches streaming voice data from SD (outside critical section).
+ *     2. Acquires a portMUX critical section to protect the voice list.
+ *     3. Calls MV_ServiceVoc() to mix one buffer.
+ *     4. Releases the critical section.
+ *     5. Calls platform_audio_write() — i2s_write may block briefly (see i2s_audio).
  *
  *   During SD card reads the game task blocks on SPI DMA semaphores; the
  *   audio task gets the CPU and delivers near-continuous audio.
@@ -26,6 +27,7 @@
 #include <stdint.h>
 
 #include "dsl.h"
+#include "mv_stream.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -80,33 +82,64 @@ void DSL_Shutdown(void) { DSL_StopPlayback(); }
 
 /* ------------------------------------------------------------------ */
 /* Audio pump task                                                     */
-/* Core 1, priority 4 — below game task at priority 5.                */
-/* Runs when game task is blocked (SD reads, WiFi, vTaskDelay, etc.)  */
+/* Core 0, priority 4 — game runs on Core 1 at priority 5.           */
 /* ------------------------------------------------------------------ */
 
 static void audio_pump_task(void *arg)
 {
     (void)arg;
-    ESP_LOGI(TAG, "audio pump started (Core %d prio 4, buf %d bytes @ %d Hz)",
-             xPortGetCoreID(), _BufferSize, _SampleRate);
+
+    const int n_samp_cfg = _BufferSize > 0 ? _BufferSize / (int)sizeof(int16_t) : 256;
+    const int sr = _SampleRate > 0 ? _SampleRate : 11025;
+    uint32_t period_ms = (uint32_t)((n_samp_cfg * 1000 + sr / 2) / sr);
+    if (period_ms < 1u) {
+        period_ms = 1u;
+    }
+    TickType_t period_ticks = pdMS_TO_TICKS(period_ms);
+    if (period_ticks < 1) {
+        period_ticks = 1;
+    }
+
+    ESP_LOGD(TAG,
+             "audio pump started (Core %d prio 4, buf %d B = %d samples, %d Hz -> "
+             "period %u ms = %u ticks)",
+             xPortGetCoreID(), _BufferSize, n_samp_cfg, sr,
+             (unsigned)period_ms, (unsigned)period_ticks);
+
+    TickType_t last_wake = xTaskGetTickCount();
 
     for (;;) {
-        /* Sleep one buffer period.  During this sleep the game task runs. */
-        vTaskDelay(pdMS_TO_TICKS(23));
+        vTaskDelayUntil(&last_wake, period_ticks);
 
         if (!_mixer_initialized || !_CallBackFunc || !_BufferStart)
             continue;
 
+        /* Pre-fetch SD data for streaming voices BEFORE the critical section.
+         * fread may block on SPI DMA; that is fine here since we do not hold
+         * the portMUX.  Ping-pong halves: inactive half is filled while the
+         * mixer consumes the active half (see multivoc.c).
+         * Run several passes: many streaming voices may each need a half
+         * filled; one walk only schedules one chunk per voice per call. */
+        for (int pf = 0; pf < 5; pf++)
+            MV_PrefetchStreams();
+
         /* Critical section: prevents game task from preempting us mid-
          * iteration of the voice linked list (same-core, nested-safe).  */
+        int mixed_page;
         portENTER_CRITICAL(&g_audio_mux);
         _CallBackFunc();   /* MV_ServiceVoc: increments MV_MixPage, mixes */
+        mixed_page = MV_MixPage;
         portEXIT_CRITICAL(&g_audio_mux);
 
-        /* Push the freshly-mixed page; non-blocking (ticks=0). */
+        /* Fill stream halves that became empty during the mix before next period. */
+        for (int pf = 0; pf < 4; pf++)
+            MV_PrefetchStreams();
+
+        /* Push the freshly-mixed page (same index MV_ServiceVoc wrote). */
         const int16_t *buf =
-            (const int16_t *)(_BufferStart + MV_MixPage * _BufferSize);
-        platform_audio_write(buf, _BufferSize / (int)sizeof(int16_t));
+            (const int16_t *)(_BufferStart + mixed_page * _BufferSize);
+        const int n_samp = _BufferSize / (int)sizeof(int16_t);
+        platform_audio_write(buf, n_samp);
     }
 }
 
@@ -131,11 +164,15 @@ int DSL_BeginBufferedPlayback(char *BufferStart, int BufferSize, int NumDivision
     _BufferSize    = BufferSize / NumDivisions;  /* bytes per mix page */
     _SampleRate    = (int)SampleRate;
 
-    ESP_LOGI(TAG, "DSL_BeginBufferedPlayback rate=%u mode=0x%x pages=%d buf=%d B",
+    ESP_LOGD(TAG, "DSL_BeginBufferedPlayback rate=%u mode=0x%x pages=%d buf=%d B",
              SampleRate, MixMode, NumDivisions, _BufferSize);
 
+    /* Pin to Core 0 — game task runs on Core 1 at priority 5; keeping audio on
+     * Core 1 at priority 4 means audio is completely starved whenever the game
+     * task runs without blocking.  Core 0 is idle during gameplay (WiFi is
+     * suspended), so audio gets its own CPU with no priority competition.     */
     if (xTaskCreatePinnedToCore(audio_pump_task, "duke_audio",
-                                4096, NULL, 4, &g_audio_task, 1) != pdPASS) {
+                                4096, NULL, 4, &g_audio_task, 0) != pdPASS) {
         ESP_LOGE(TAG, "failed to create audio pump task");
         DSL_SetErrorCode(DSL_MixerInitFailure);
         return DSL_Error;

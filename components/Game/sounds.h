@@ -56,6 +56,11 @@ void MusicShutdown( void );
 /* sounds.c */
 void clearsoundlocks(void);
 
+#ifndef PLATFORM_DOS
+/* True if sound n is streamed from GRP (SoundIndexGRP); getsound() must not overwrite soundsiz[]. */
+int Sound_IsStreamIndexed(uint16_t num);
+#endif
+
 /* dunno where this came from; I added it. --ryan. */
 void testcallback(uint32_t num);
 

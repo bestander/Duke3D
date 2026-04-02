@@ -78,7 +78,8 @@ typedef enum
    Raw,
    VOC,
    DemandFeed,
-   WAV
+   WAV,
+   Stream      /* SD-streaming: PCM read from GRP on demand, no PSRAM buffer */
    } wavedata;
 
 typedef enum
@@ -136,6 +137,19 @@ typedef struct VoiceNode
    int           GVal[4];
 
    unsigned long callbackval;
+
+#ifndef PLATFORM_DOS
+   /* SD-streaming fields — valid when wavetype == Stream.
+    * stream_buf is 1024 bytes (two 512-byte halves), internal RAM preferred in MV_Init.
+    * Ping-pong: prefetch fills the inactive half while the mixer reads the active
+    * half — a single buffer would be overwritten mid-block (see mv_stream.h). */
+   int32_t  stream_grp_offset;  /* absolute byte offset of raw PCM in GRP file */
+   int32_t  stream_total_len;   /* total PCM byte length of this sound */
+   int32_t  stream_pos;         /* next file offset within PCM (bytes read from start) */
+   int32_t  stream_half_ready[2]; /* valid prefetched bytes per half; 0 = empty */
+   uint8_t  stream_active;        /* 0/1: which half voice->sound currently uses */
+   uint8_t *stream_buf;           /* 1024 bytes, halves at [0..511] and [512..1023] */
+#endif
 
    } VoiceNode;
 

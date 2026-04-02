@@ -744,10 +744,15 @@ int32_t TCkopen4load(const char  *filename, int readfromGRP)
 {
 	char  fullfilename[512];
 	int32_t result = 0;
+
+	/* Empty name -> fullfilename becomes game_dir + "/" only (e.g. /sdcard/duke3d/);
+	 * many DEFS sound slots are unused (sounds[i][0]==0). Do not open a "directory path". */
+	if (filename == NULL || filename[0] == '\0')
+		return -1;
     
 	if(game_dir[0] != '\0' && !readfromGRP)
 	{
-		sprintf(fullfilename, "%s\\%s", game_dir, filename);
+		sprintf(fullfilename, "%s%s%s", game_dir, PATH_SEP_STR, filename);
 		if (!SafeFileExists(fullfilename)) // try root
 			sprintf(fullfilename, "%s", filename);
 	}

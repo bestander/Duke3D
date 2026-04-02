@@ -30,15 +30,226 @@ Prepared for public release: 03/21/2003 - Charlie Wiederhold, 3D Realms
 
 #ifndef PLATFORM_DOS
 #include "esp_heap_caps.h"
-#endif
+#include "esp_log.h"
+#include "../audiolib/mv_stream.h"
+#endif /* PLATFORM_DOS (early includes) */
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include "types.h"
 #include "util_lib.h"
 #include "duke3d.h"
 #include "global.h"
 #include "filesystem.h"
+
+#ifndef PLATFORM_DOS
+#define GRP_PATH "/sdcard/duke3d/DUKE3D.GRP"
+static const char *SND_TAG = "sounds";
+
+/* Per-sound streaming index built once at startup by SoundIndexGRP().
+ * sound_grp_pcm_offset[n] = absolute byte offset of raw PCM in GRP file,
+ * or -1 if the sound is not indexed (absent, looped, or parse error).
+ * sound_pcm_rate_table[n] = source sample rate in Hz. */
+EXT_RAM_ATTR static int32_t  sound_grp_pcm_offset[NUM_SOUNDS];
+EXT_RAM_ATTR static uint32_t sound_pcm_rate_table[NUM_SOUNDS];
+
+int Sound_IsStreamIndexed(uint16_t num)
+{
+    if (num >= NUM_SOUNDS) return 0;
+    return sound_grp_pcm_offset[num] >= 0;
+}
+
+/* Parse a VOC file header to locate the raw PCM block.
+ * hdr must contain at least the first 128 bytes of the file. */
+static int parse_voc_header(const uint8_t *hdr,
+                             int32_t *pcm_start, int32_t *pcm_len,
+                             uint32_t *rate)
+{
+    /* VOC header layout:
+     *   bytes  0-18: "Creative Voice File" (19 bytes)
+     *   byte    19:  0x1A (EOF marker)
+     *   bytes 20-21: uint16 LE offset to first data block (usually 26)
+     *   bytes 22-23: version
+     *   bytes 24-25: version XOR check */
+    uint16_t data_off = (uint16_t)(hdr[20] | ((unsigned)hdr[21] << 8));
+    if (data_off < 26 || data_off + 6 > 128) return 0;
+
+    /* Block header at data_off: type(1) + size(3) + sr_div(1) + codec(1) */
+    if (hdr[data_off] != 1) return 0;  /* must be Sound Data block */
+    uint32_t block_size = (uint32_t)hdr[data_off+1]
+                        | ((uint32_t)hdr[data_off+2] << 8)
+                        | ((uint32_t)hdr[data_off+3] << 16);
+    if (block_size < 2) return 0;
+    uint8_t sr_div = hdr[data_off + 4];
+    /* codec 0 = 8-bit unsigned PCM; accept only uncompressed */
+    if (hdr[data_off + 5] != 0) return 0;
+
+    *pcm_start = (int32_t)data_off + 6;
+    *pcm_len   = (int32_t)(block_size - 2);
+    *rate      = 1000000u / (256u - (unsigned)sr_div);
+    return 1;
+}
+
+/* Parse RIFF WAVE: require PCM fmt + data chunk in first 128 bytes.
+ * Streaming uses MV_PlayStream with bits=8 and mono mix — reject anything else
+ * so we do not index 16-bit/stereo WAV as wrong-length 8-bit (silent/garbled). */
+static int parse_wav_header(const uint8_t *hdr,
+                             int32_t *pcm_start, int32_t *pcm_len,
+                             uint32_t *rate)
+{
+    int      fmt_ok = 0;
+    uint32_t fmt_rate = 11025;
+
+    if (memcmp(hdr, "RIFF", 4) != 0 || memcmp(hdr + 8, "WAVE", 4) != 0)
+        return 0;
+
+    int pos = 12;
+    while (pos + 8 <= 128) {
+        uint32_t sz = (uint32_t)hdr[pos + 4] | ((uint32_t)hdr[pos + 5] << 8)
+                    | ((uint32_t)hdr[pos + 6] << 16) | ((uint32_t)hdr[pos + 7] << 24);
+        int chunk_body = (int)sz;
+        int skip       = 8 + chunk_body + (chunk_body & 1); /* word-align */
+
+        if (memcmp(hdr + pos, "fmt ", 4) == 0) {
+            int d0 = pos + 8;
+            if (d0 + 16 > 128 || sz < 16)
+                return 0;
+            uint16_t audio_fmt = (uint16_t)hdr[d0] | ((uint16_t)hdr[d0 + 1] << 8);
+            uint16_t channels  = (uint16_t)hdr[d0 + 2] | ((uint16_t)hdr[d0 + 3] << 8);
+            fmt_rate = (uint32_t)hdr[d0 + 4] | ((uint32_t)hdr[d0 + 5] << 8)
+                     | ((uint32_t)hdr[d0 + 6] << 16) | ((uint32_t)hdr[d0 + 7] << 24);
+            uint16_t bps = (uint16_t)hdr[d0 + 14] | ((uint16_t)hdr[d0 + 15] << 8);
+            if (audio_fmt != 1u || channels != 1u || bps != 8u)
+                return 0;
+            fmt_ok = 1;
+        } else if (memcmp(hdr + pos, "data", 4) == 0) {
+            if (!fmt_ok)
+                return 0;
+            *pcm_len   = (int32_t)sz;
+            *pcm_start = pos + 8;
+            *rate      = fmt_rate;
+            return (*pcm_len > 0) ? 1 : 0;
+        }
+
+        if (skip < 8 || pos + skip > 128)
+            break;
+        pos += skip;
+    }
+    return 0;
+}
+
+/* Build the streaming index: scan the GRP directory once at startup.
+ * Fills sound_grp_pcm_offset[] and sound_pcm_rate_table[].
+ * Called from SoundStartup() after FX_Init succeeds. */
+static void SoundIndexGRP(void)
+{
+    memset(sound_grp_pcm_offset, 0xFF, sizeof(sound_grp_pcm_offset)); /* -1 */
+
+    FILE *f = fopen(GRP_PATH, "rb");
+    if (!f) { ESP_LOGE(SND_TAG, "SoundIndexGRP: cannot open %s", GRP_PATH); return; }
+
+    char magic[12];
+    uint32_t num_files;
+    if (fread(magic, 1, 12, f) != 12 || fread(&num_files, 4, 1, f) != 1
+        || memcmp(magic, "KenSilverman", 12) != 0 || num_files == 0) {
+        ESP_LOGE(SND_TAG, "SoundIndexGRP: bad GRP header");
+        fclose(f); return;
+    }
+
+    /* Allocate directory buffer temporarily */
+    size_t dir_bytes = (size_t)num_files * 16;
+    uint8_t *dir = (uint8_t *)malloc(dir_bytes);
+    if (!dir) { ESP_LOGE(SND_TAG, "SoundIndexGRP: OOM for dir"); fclose(f); return; }
+
+    if (fread(dir, 1, dir_bytes, f) != dir_bytes) {
+        ESP_LOGE(SND_TAG, "SoundIndexGRP: short directory read");
+        free(dir); fclose(f); return;
+    }
+
+    uint32_t data_base = 16 + (uint32_t)dir_bytes;  /* offset where file data starts */
+    uint32_t file_off  = 0;
+
+    for (uint32_t i = 0; i < num_files; i++) {
+        const char *grp_name = (const char *)(dir + i * 16);
+        uint32_t    grp_size = (uint32_t)dir[i*16+12] | ((uint32_t)dir[i*16+13] << 8)
+                             | ((uint32_t)dir[i*16+14] << 16) | ((uint32_t)dir[i*16+15] << 24);
+        char name_buf[13];
+        memcpy(name_buf, grp_name, 12);
+        name_buf[12] = '\0';
+
+        for (int j = 0; j < NUM_SOUNDS; j++) {
+            if (sounds[j][0] == '\0') continue;
+            if (strcasecmp(name_buf, sounds[j]) == 0) {
+                sound_grp_pcm_offset[j] = (int32_t)(data_base + file_off);
+                soundsiz[j] = (int32_t)grp_size;
+                break;
+            }
+        }
+        file_off += grp_size;
+    }
+    free(dir);
+
+    /* Parse headers to convert file offsets to PCM offsets */
+    uint8_t hdr[128];
+    int indexed = 0;
+    for (int j = 0; j < NUM_SOUNDS; j++) {
+        if (sound_grp_pcm_offset[j] < 0) continue;
+        fseek(f, (long)sound_grp_pcm_offset[j], SEEK_SET);
+        if ((int)fread(hdr, 1, sizeof(hdr), f) < 32) {
+            sound_grp_pcm_offset[j] = -1; continue;
+        }
+        int32_t  pcm_start = 0, pcm_len = 0;
+        uint32_t rate = 11025;
+        int ok;
+        if (hdr[0] == 'C')
+            ok = parse_voc_header(hdr, &pcm_start, &pcm_len, &rate);
+        else if (hdr[0] == 'R')
+            ok = parse_wav_header(hdr, &pcm_start, &pcm_len, &rate);
+        else
+            ok = 0;
+
+        if (!ok || pcm_len <= 0) { sound_grp_pcm_offset[j] = -1; continue; }
+
+        sound_grp_pcm_offset[j] += pcm_start;   /* absolute GRP offset of PCM */
+        soundsiz[j]               = pcm_len;
+        sound_pcm_rate_table[j]   = rate;
+        indexed++;
+    }
+    fclose(f);
+
+    ESP_LOGD(SND_TAG, "SoundIndexGRP: %d/%d sounds indexed for streaming", indexed, NUM_SOUNDS);
+
+    /* Open the persistent GRP fd used by the audio task for ongoing streaming */
+    MV_OpenGRPStream(GRP_PATH);
+}
+
+/* Play a non-looped sound via SD streaming.
+ * Opens GRP briefly for the initial chunk (up to MV_STREAM_HALF) so the first
+ * mix period has data immediately (no 23 ms silence). */
+static int play_sound_stream(int32_t pcm_abs_offset, int32_t pcm_len,
+                              uint32_t rate, int pitch,
+                              int angle, int distance,
+                              int priority, int32_t callbackval)
+{
+    uint8_t  init_buf[4096];  /* must be >= MV_STREAM_HALF in multivoc.c */
+    int32_t  init_len = 0;
+    {
+        size_t want = sizeof(init_buf);
+        if (pcm_len > 0 && (int32_t)want > pcm_len)
+            want = (size_t)pcm_len;
+        int n = MV_GrpStreamReadAt((int64_t)pcm_abs_offset, init_buf, want);
+        if (n > 0)
+            init_len = n;
+        else if (n < 0)
+            ESP_LOGW(SND_TAG, "play_sound_stream: MV_GrpStreamReadAt failed for init read");
+    }
+    return MV_PlayStream3D(pcm_abs_offset, pcm_len, (unsigned)rate,
+                           init_buf, init_len,
+                           pitch, angle, distance, priority,
+                           (unsigned long)callbackval);
+}
+#endif /* PLATFORM_DOS */
 
 
 #define LOUDESTVOLUME 150
@@ -104,6 +315,13 @@ void SoundStartup( void )
       {
       Error(EXIT_FAILURE, FX_ErrorString( FX_Error ));
       }
+
+#ifndef PLATFORM_DOS
+   /* Build streaming index: scan GRP directory, parse VOC/WAV headers.
+    * After this call, sound_grp_pcm_offset[n] >= 0 for all indexable sounds.
+    * Also opens the persistent GRP fd used by the audio task. */
+   SoundIndexGRP();
+#endif
 
    status = FX_SetCallBack( TestCallBack );
 
@@ -275,6 +493,12 @@ uint8_t  loadsound(uint16_t num)
     if(num >= NUM_SOUNDS || SoundToggle == 0) return 0;
     if (FXDevice == NumSoundCards) return 0;
 
+#ifndef PLATFORM_DOS
+    /* One-shot stream path keeps ptr==0; looped FX need full VOC/WAV in RAM (loop offset at ptr+0x14). */
+    if (Sound_IsStreamIndexed(num) && (soundm[num] & 1) == 0)
+        return 1;
+#endif
+
     fp = TCkopen4load(sounds[num],0);
     if(fp == -1)
     {
@@ -398,14 +622,6 @@ int xyzsound(short num,short i,int32_t x,int32_t y,int32_t z)
         sndang &= 2047;
     }
 
-    if(Sound[num].ptr == 0) { if( loadsound(num) == 0 ) return 0; }
-    else
-    {
-       if (Sound[num].lock < 200)
-          Sound[num].lock = 200;
-       else Sound[num].lock++;
-    }
-
     if( soundm[num]&16 ) sndist = 0;
 
     if(sndist < ((255-LOUDESTVOLUME)<<6) )
@@ -413,9 +629,18 @@ int xyzsound(short num,short i,int32_t x,int32_t y,int32_t z)
 
     if( soundm[num]&1 )
     {
+        /* Looped ambient sound — must be fully loaded in PSRAM (loop pointers
+         * into the buffer; streaming cannot handle these). */
         uint16_t start;
 
         if(Sound[num].num > 0) return -1;
+
+        if(Sound[num].ptr == 0) { if( loadsound(num) == 0 ) return 0; }
+        else
+        {
+           if (Sound[num].lock < 200) Sound[num].lock = 200;
+           else Sound[num].lock++;
+        }
 
         start = *(uint16_t *)(Sound[num].ptr + 0x14);
 
@@ -426,8 +651,29 @@ int xyzsound(short num,short i,int32_t x,int32_t y,int32_t z)
             voice = FX_PlayLoopedWAV( Sound[num].ptr, start, start + soundsiz[num],
                     pitch,sndist>>6,sndist>>6,0,soundpr[num],num);
     }
+#ifndef PLATFORM_DOS
+    else if( sound_grp_pcm_offset[num] >= 0 )
+    {
+        /* Non-looped sound with a valid streaming index: stream from GRP.
+         * Drop any allocache buffer getsound() may have set — it was never
+         * used and clearsoundlocks() must not heap_caps_free an allocache ptr. */
+        Sound[num].ptr = 0;
+        Sound[num].lock = (Sound[num].lock < 200) ? 200 : Sound[num].lock + 1;
+        voice = play_sound_stream(sound_grp_pcm_offset[num], soundsiz[num],
+                                  sound_pcm_rate_table[num],
+                                  pitch, sndang>>6, sndist>>6,
+                                  soundpr[num], num);
+    }
+#endif
     else
     {
+        /* Fallback: load into PSRAM (streaming index unavailable). */
+        if(Sound[num].ptr == 0) { if( loadsound(num) == 0 ) return 0; }
+        else
+        {
+           if (Sound[num].lock < 200) Sound[num].lock = 200;
+           else Sound[num].lock++;
+        }
         if( *Sound[num].ptr == 'C')
             voice = FX_PlayVOC3D( Sound[ num ].ptr,pitch,sndang>>6,sndist>>6, soundpr[num], num );
         else voice = FX_PlayWAV3D( Sound[ num ].ptr,pitch,sndang>>6,sndist>>6, soundpr[num], num );
@@ -467,16 +713,15 @@ void sound(short num)
     }
     else pitch = pitchs;
 
-    if(Sound[num].ptr == 0) { if( loadsound(num) == 0 ) return; }
-    else
-    {
-       if (Sound[num].lock < 200)
-          Sound[num].lock = 200;
-       else Sound[num].lock++;
-    }
-
     if( soundm[num]&1 )
     {
+        /* Looped sound — must be fully loaded in PSRAM. */
+        if(Sound[num].ptr == 0) { if( loadsound(num) == 0 ) return; }
+        else
+        {
+           if (Sound[num].lock < 200) Sound[num].lock = 200;
+           else Sound[num].lock++;
+        }
         if(*Sound[num].ptr == 'C')
         {
             start = (int32_t)*(uint16_t *)(Sound[num].ptr + 0x14);
@@ -490,8 +735,28 @@ void sound(short num)
                     pitch,LOUDESTVOLUME,LOUDESTVOLUME,LOUDESTVOLUME,soundpr[num],num);
         }
     }
+#ifndef PLATFORM_DOS
+    else if( sound_grp_pcm_offset[num] >= 0 )
+    {
+        /* Non-looped sound: stream from GRP at full (loudest) volume.
+         * Drop any allocache buffer getsound() may have set. */
+        Sound[num].ptr = 0;
+        Sound[num].lock = (Sound[num].lock < 200) ? 200 : Sound[num].lock + 1;
+        voice = play_sound_stream(sound_grp_pcm_offset[num], soundsiz[num],
+                                  sound_pcm_rate_table[num],
+                                  pitch, 0, 255-LOUDESTVOLUME,
+                                  soundpr[num], num);
+    }
+#endif
     else
     {
+        /* Fallback: PSRAM load. */
+        if(Sound[num].ptr == 0) { if( loadsound(num) == 0 ) return; }
+        else
+        {
+           if (Sound[num].lock < 200) Sound[num].lock = 200;
+           else Sound[num].lock++;
+        }
         if(*Sound[num].ptr == 'C')
             voice = FX_PlayVOC3D( Sound[ num ].ptr, pitch,0,255-LOUDESTVOLUME,soundpr[num], num );
         else

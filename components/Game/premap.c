@@ -241,6 +241,13 @@ uint8_t  getsound(uint16_t num)
     if(num >= NUM_SOUNDS || SoundToggle == 0) return 0;
     if (FXDevice == NumSoundCards) return 0;
 
+#ifndef PLATFORM_DOS
+    /* SoundIndexGRP() stored raw PCM length in soundsiz[]; do not replace it with
+     * kfilelength for streamable one-shots. Looped sounds must load the full file. */
+    if (Sound_IsStreamIndexed(num) && (soundm[num] & 1) == 0)
+        return 1;
+#endif
+
     fp = TCkopen4load(sounds[num],0);
     if(fp == -1) return 0;
 
