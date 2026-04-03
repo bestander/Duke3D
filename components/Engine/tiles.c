@@ -415,10 +415,21 @@ static int tile_async_try_schedule(short tilenume)
     }
     int32_t cacheBytes = do_scale ? (new_w * new_h) : tileFilesize;
 
-    tiles[tilenume].lock = 250;
+    /* allocache() eviction: cache.c treats *lock >= 200 as non-evictable and will
+     * report "CACHE SPACE ALL LOCKED UP!" if the 256KB arena is full of them.
+     * Use 199 like sync loadtile — placeholders participate in normal LRU. */
+    if (xSemaphoreTakeRecursive(g_tile_sd_mutex, portMAX_DELAY) != pdTRUE)
+        return 0;
+    if (waloff[tilenume] != NULL) {
+        xSemaphoreGiveRecursive(g_tile_sd_mutex);
+        return 0;
+    }
+
+    tiles[tilenume].lock = 199;
     allocache(&waloff[tilenume], cacheBytes, (uint8_t *)&tiles[tilenume].lock);
     if (waloff[tilenume] == NULL) {
         tiles[tilenume].lock = 0;
+        xSemaphoreGiveRecursive(g_tile_sd_mutex);
         return 0;
     }
     memset(waloff[tilenume], 0, (size_t)cacheBytes);
@@ -435,6 +446,10 @@ static int tile_async_try_schedule(short tilenume)
         }
         picsiz[tilenume] = (uint8_t)(pw | (ph << 4));
     }
+
+    /* Do not xQueueSend while holding the mutex: a full queue would block forever
+     * while the worker waits on the same mutex. */
+    xSemaphoreGiveRecursive(g_tile_sd_mutex);
 
     if (xQueueSend(g_tile_async_q, &tilenume, portMAX_DELAY) != pdTRUE) {
         tiles[tilenume].lock = 0;
@@ -455,7 +470,8 @@ static void tile_async_worker_main(void *arg)
             continue;
         if (xSemaphoreTakeRecursive(g_tile_sd_mutex, portMAX_DELAY) != pdTRUE)
             continue;
-        if (waloff[tilenume] != NULL && tiles[tilenume].lock == 250)
+        /* Slot may have been evicted (waloff cleared); skip quietly. */
+        if (waloff[tilenume] != NULL)
             loadtile_grp_read_into_slot(tilenume);
         xSemaphoreGiveRecursive(g_tile_sd_mutex);
     }
