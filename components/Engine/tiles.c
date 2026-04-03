@@ -16,10 +16,26 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 
+#ifdef DUKE3D_TILE_ASYNC_SPIKE
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+#include <string.h>
+#endif
+
 // Per-frame diagnostic counters — read and reset by spi_lcd_send_boarder() each frame.
 volatile int32_t diag_tile_loads = 0;   // number of loadtile() calls this frame
 volatile int32_t diag_tile_bytes = 0;   // bytes read from SD this frame
 volatile int64_t diag_tile_us    = 0;   // microseconds spent in kread() this frame
+
+#ifdef DUKE3D_TILE_ASYNC_SPIKE
+static SemaphoreHandle_t g_tile_sd_mutex;
+static int g_tile_sd_mutex_ready;
+volatile int tile_async_spike_runtime_enabled = 1;
+static QueueHandle_t g_tile_async_q;
+enum { TILE_ASYNC_QUEUE_LEN = 64 };
+static void tile_async_worker_main(void *arg);
+#endif
 
 char  artfilename[20];
 
@@ -127,9 +143,101 @@ IRAM_ATTR void setgotpic(int32_t tilenume)
 // dimensions; picsiz is updated when downscaling so drawing uses the right mask.
 #define MAX_TILE_DIM DUKE3D_TILE_MAX_NATIVE_EDGE
 
-void loadtile(short tilenume)
+/* GRP seek + read (+ optional downscale) into existing waloff[]. Used by sync loadtile
+ * and async worker. Skips TILECACHE and allocache. Caller must hold tile SD mutex (spike). */
+static void loadtile_grp_read_into_slot(short tilenume)
 {
-    uint8_t  *ptr;
+    int32_t i, tileFilesize;
+    int32_t orig_w = tiles[tilenume].dim.width;
+    int32_t orig_h = tiles[tilenume].dim.height;
+    tileFilesize = orig_w * orig_h;
+    if (tileFilesize <= 0 || waloff[tilenume] == NULL) {
+        tiles[tilenume].lock = 199;
+        return;
+    }
+
+    int32_t new_w = orig_w, new_h = orig_h;
+    while (new_w > MAX_TILE_DIM) new_w >>= 1;
+    while (new_h > MAX_TILE_DIM) new_h >>= 1;
+    if (new_w < 1) new_w = 1;
+    if (new_h < 1) new_h = 1;
+
+    int32_t do_scale = (new_w != orig_w || new_h != orig_h);
+    uint8_t *tmp_buf = NULL;
+    if (do_scale) {
+        tmp_buf = (uint8_t *)heap_caps_malloc(tileFilesize,
+                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!tmp_buf) do_scale = 0;
+    }
+
+    i = tilefilenum[tilenume];
+    if (i != artfilnum) {
+        if (artfil != -1)
+            kclose(artfil);
+        artfilnum = i;
+        artfilplc = 0L;
+
+        artfilename[7] = (i % 10) + 48;
+        artfilename[6] = ((i / 10) % 10) + 48;
+        artfilename[5] = ((i / 100) % 10) + 48;
+        artfil = TCkopen4load(artfilename, 0);
+
+        if (artfil == -1) {
+            printf("Error, unable to load artfile:'%s'.\n", artfilename);
+            getchar();
+            exit(0);
+        }
+
+        faketimerhandler();
+    }
+
+    if (artfilplc != tilefileoffs[tilenume]) {
+        klseek(artfil, tilefileoffs[tilenume] - artfilplc, SEEK_CUR);
+        faketimerhandler();
+    }
+
+    {
+        int64_t _t0 = esp_timer_get_time();
+
+        if (!do_scale) {
+            kread(artfil, waloff[tilenume], tileFilesize);
+        } else {
+            kread(artfil, tmp_buf, tileFilesize);
+            uint8_t *dst = waloff[tilenume];
+            for (int32_t x = 0; x < new_w; x++) {
+                int32_t sx = (x * orig_w) / new_w;
+                for (int32_t y = 0; y < new_h; y++) {
+                    int32_t sy = (y * orig_h) / new_h;
+                    dst[x * new_h + y] = tmp_buf[sx * orig_h + sy];
+                }
+            }
+            heap_caps_free(tmp_buf);
+
+            {
+                int32_t pw = 0, ph = 0, w = new_w, h = new_h;
+                while (w > 1) {
+                    pw++;
+                    w >>= 1;
+                }
+                while (h > 1) {
+                    ph++;
+                    h >>= 1;
+                }
+                picsiz[tilenume] = (uint8_t)(pw | (ph << 4));
+            }
+        }
+
+        diag_tile_us += esp_timer_get_time() - _t0;
+        diag_tile_loads += 1;
+        diag_tile_bytes += tileFilesize;
+    }
+    faketimerhandler();
+    artfilplc = tilefileoffs[tilenume] + tileFilesize;
+    tiles[tilenume].lock = 199;
+}
+
+static void loadtile_body(short tilenume)
+{
     int32_t i, tileFilesize;
 
     if ((uint32_t)tilenume >= (uint32_t)MAXTILES)
@@ -149,54 +257,55 @@ void loadtile(short tilenume)
         if (tilecache_lookup(tilenume, &hit)) {
             int64_t _t0 = esp_timer_get_time();
             tiles[tilenume].lock = 199;
-            allocache(&waloff[tilenume], hit.w * hit.h, (uint8_t*)&tiles[tilenume].lock);
+            allocache(&waloff[tilenume], hit.w * hit.h, (uint8_t *)&tiles[tilenume].lock);
             tilecache_read(hit.off, waloff[tilenume], hit.w * hit.h);
-            diag_tile_us    += esp_timer_get_time() - _t0;
+            diag_tile_us += esp_timer_get_time() - _t0;
             diag_tile_loads += 1;
             diag_tile_bytes += hit.w * hit.h;
             int32_t pw = 0, ph = 0, tw = hit.w, th = hit.h;
-            while (tw > 1) { pw++; tw >>= 1; }
-            while (th > 1) { ph++; th >>= 1; }
+            while (tw > 1) {
+                pw++;
+                tw >>= 1;
+            }
+            while (th > 1) {
+                ph++;
+                th >>= 1;
+            }
             picsiz[tilenume] = (uint8_t)(pw | (ph << 4));
             return;
         }
     }
 
-    // Compute downscaled dimensions: halve each axis until ≤ MAX_TILE_DIM.
-    // Bit-shift keeps the result a power-of-2, which the Build Engine requires
-    // for the bitwise coordinate masking in picsiz.
     int32_t new_w = orig_w, new_h = orig_h;
     while (new_w > MAX_TILE_DIM) new_w >>= 1;
     while (new_h > MAX_TILE_DIM) new_h >>= 1;
     if (new_w < 1) new_w = 1;
     if (new_h < 1) new_h = 1;
 
-    // Decide whether to downscale. If yes, try to borrow a temp buffer from
-    // the PSRAM heap for the full-size read; fall back to full-size if OOM.
     int32_t do_scale = (new_w != orig_w || new_h != orig_h);
     uint8_t *tmp_buf = NULL;
     if (do_scale) {
-        tmp_buf = (uint8_t*)heap_caps_malloc(tileFilesize,
-                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!tmp_buf) do_scale = 0;  // OOM — fall back to full-size direct read
+        tmp_buf = (uint8_t *)heap_caps_malloc(tileFilesize,
+                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!tmp_buf) do_scale = 0;
     }
 
     int32_t cacheBytes = do_scale ? (new_w * new_h) : tileFilesize;
 
     i = tilefilenum[tilenume];
-    if (i != artfilnum){
+    if (i != artfilnum) {
         if (artfil != -1)
             kclose(artfil);
         artfilnum = i;
         artfilplc = 0L;
 
-        artfilename[7] = (i%10)+48;
-        artfilename[6] = ((i/10)%10)+48;
-        artfilename[5] = ((i/100)%10)+48;
-        artfil = TCkopen4load(artfilename,0);
+        artfilename[7] = (i % 10) + 48;
+        artfilename[6] = ((i / 10) % 10) + 48;
+        artfilename[5] = ((i / 100) % 10) + 48;
+        artfil = TCkopen4load(artfilename, 0);
 
-        if (artfil == -1){
-            printf("Error, unable to load artfile:'%s'.\n",artfilename);
+        if (artfil == -1) {
+            printf("Error, unable to load artfile:'%s'.\n", artfilename);
             getchar();
             exit(0);
         }
@@ -204,14 +313,13 @@ void loadtile(short tilenume)
         faketimerhandler();
     }
 
-    if (waloff[tilenume] == NULL){
+    if (waloff[tilenume] == NULL) {
         tiles[tilenume].lock = 199;
-        allocache(&waloff[tilenume], cacheBytes, (uint8_t*)&tiles[tilenume].lock);
+        allocache(&waloff[tilenume], cacheBytes, (uint8_t *)&tiles[tilenume].lock);
     }
 
-    if (artfilplc != tilefileoffs[tilenume])
-    {
-        klseek(artfil, tilefileoffs[tilenume]-artfilplc, SEEK_CUR);
+    if (artfilplc != tilefileoffs[tilenume]) {
+        klseek(artfil, tilefileoffs[tilenume] - artfilplc, SEEK_CUR);
         faketimerhandler();
     }
 
@@ -219,12 +327,8 @@ void loadtile(short tilenume)
         int64_t _t0 = esp_timer_get_time();
 
         if (!do_scale) {
-            // No downscaling — read directly into cache slot.
             kread(artfil, waloff[tilenume], tileFilesize);
         } else {
-            // Read full tile into PSRAM temp buffer, then nearest-neighbour
-            // downsample into the (smaller) cache slot.
-            // Tile data is column-major: index = x * orig_h + y.
             kread(artfil, tmp_buf, tileFilesize);
             uint8_t *dst = waloff[tilenume];
             for (int32_t x = 0; x < new_w; x++) {
@@ -234,20 +338,23 @@ void loadtile(short tilenume)
                     dst[x * new_h + y] = tmp_buf[sx * orig_h + sy];
                 }
             }
-            free(tmp_buf);
+            heap_caps_free(tmp_buf);
 
-            // Update picsiz so the renderer uses the right coordinate mask.
-            // tiles[tilenume].dim is intentionally left at original values so
-            // tileFilesize is correct on re-load and sprite screen-sizing is unchanged.
             {
                 int32_t pw = 0, ph = 0, w = new_w, h = new_h;
-                while (w > 1) { pw++; w >>= 1; }
-                while (h > 1) { ph++; h >>= 1; }
+                while (w > 1) {
+                    pw++;
+                    w >>= 1;
+                }
+                while (h > 1) {
+                    ph++;
+                    h >>= 1;
+                }
                 picsiz[tilenume] = (uint8_t)(pw | (ph << 4));
             }
         }
 
-        diag_tile_us    += esp_timer_get_time() - _t0;
+        diag_tile_us += esp_timer_get_time() - _t0;
         diag_tile_loads += 1;
         diag_tile_bytes += tileFilesize;
     }
@@ -255,6 +362,137 @@ void loadtile(short tilenume)
     artfilplc = tilefileoffs[tilenume] + tileFilesize;
 }
 
+void loadtile(short tilenume)
+{
+#ifdef DUKE3D_TILE_ASYNC_SPIKE
+    if (g_tile_sd_mutex_ready) {
+        if (xSemaphoreTakeRecursive(g_tile_sd_mutex, portMAX_DELAY) != pdTRUE)
+            return;
+    }
+#endif
+    loadtile_body(tilenume);
+#ifdef DUKE3D_TILE_ASYNC_SPIKE
+    if (g_tile_sd_mutex_ready)
+        xSemaphoreGiveRecursive(g_tile_sd_mutex);
+#endif
+}
+
+#ifdef DUKE3D_TILE_ASYNC_SPIKE
+static int tile_async_try_schedule(short tilenume)
+{
+    if ((uint32_t)tilenume >= (uint32_t)MAXTILES)
+        return 0;
+    if (!g_tile_sd_mutex_ready || g_tile_async_q == NULL)
+        return 0;
+    if (!tile_async_spike_runtime_enabled)
+        return 0;
+
+    TileCacheHit hit;
+    if (tilecache_lookup(tilenume, &hit))
+        return 0;
+
+    int32_t orig_w = tiles[tilenume].dim.width;
+    int32_t orig_h = tiles[tilenume].dim.height;
+    int32_t tileFilesize = orig_w * orig_h;
+    if (tileFilesize <= 0)
+        return 0;
+
+    int32_t new_w = orig_w, new_h = orig_h;
+    while (new_w > MAX_TILE_DIM) new_w >>= 1;
+    while (new_h > MAX_TILE_DIM) new_h >>= 1;
+    if (new_w < 1) new_w = 1;
+    if (new_h < 1) new_h = 1;
+
+    int32_t do_scale = (new_w != orig_w || new_h != orig_h);
+    uint8_t *tmp_probe = NULL;
+    if (do_scale) {
+        tmp_probe = (uint8_t *)heap_caps_malloc(tileFilesize,
+                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!tmp_probe)
+            do_scale = 0;
+        else
+            heap_caps_free(tmp_probe);
+    }
+    int32_t cacheBytes = do_scale ? (new_w * new_h) : tileFilesize;
+
+    tiles[tilenume].lock = 250;
+    allocache(&waloff[tilenume], cacheBytes, (uint8_t *)&tiles[tilenume].lock);
+    if (waloff[tilenume] == NULL) {
+        tiles[tilenume].lock = 0;
+        return 0;
+    }
+    memset(waloff[tilenume], 0, (size_t)cacheBytes);
+
+    if (do_scale) {
+        int32_t pw = 0, ph = 0, w = new_w, h = new_h;
+        while (w > 1) {
+            pw++;
+            w >>= 1;
+        }
+        while (h > 1) {
+            ph++;
+            h >>= 1;
+        }
+        picsiz[tilenume] = (uint8_t)(pw | (ph << 4));
+    }
+
+    if (xQueueSend(g_tile_async_q, &tilenume, portMAX_DELAY) != pdTRUE) {
+        tiles[tilenume].lock = 0;
+        waloff[tilenume] = NULL;
+        return 0;
+    }
+    return 1;
+}
+
+static void tile_async_worker_main(void *arg)
+{
+    (void)arg;
+    short tilenume;
+    for (;;) {
+        if (xQueueReceive(g_tile_async_q, &tilenume, portMAX_DELAY) != pdTRUE)
+            continue;
+        if (!g_tile_sd_mutex_ready)
+            continue;
+        if (xSemaphoreTakeRecursive(g_tile_sd_mutex, portMAX_DELAY) != pdTRUE)
+            continue;
+        if (waloff[tilenume] != NULL && tiles[tilenume].lock == 250)
+            loadtile_grp_read_into_slot(tilenume);
+        xSemaphoreGiveRecursive(g_tile_sd_mutex);
+    }
+}
+
+void tile_async_spike_init(void)
+{
+    if (g_tile_sd_mutex_ready)
+        return;
+    g_tile_sd_mutex = xSemaphoreCreateRecursiveMutex();
+    if (g_tile_sd_mutex == NULL) {
+        printf("[tile_async_spike] mutex create failed\n");
+        return;
+    }
+    g_tile_async_q = xQueueCreate(TILE_ASYNC_QUEUE_LEN, sizeof(short));
+    if (g_tile_async_q == NULL) {
+        vSemaphoreDelete(g_tile_sd_mutex);
+        g_tile_sd_mutex = NULL;
+        printf("[tile_async_spike] queue create failed\n");
+        return;
+    }
+    g_tile_sd_mutex_ready = 1;
+    if (xTaskCreatePinnedToCore(tile_async_worker_main, "tile_async", 4096, NULL, 3, NULL, 0) !=
+        pdPASS) {
+        printf("[tile_async_spike] worker task create failed\n");
+        g_tile_sd_mutex_ready = 0;
+        vQueueDelete(g_tile_async_q);
+        g_tile_async_q = NULL;
+        vSemaphoreDelete(g_tile_sd_mutex);
+        g_tile_sd_mutex = NULL;
+        return;
+    }
+    printf("[tile_async_spike] worker on core0, queue depth %d (placeholder=pal 0)\n",
+           TILE_ASYNC_QUEUE_LEN);
+}
+
+#endif /* DUKE3D_TILE_ASYNC_SPIKE */
 
 
 uint8_t* allocatepermanenttile(short tilenume, int32_t width, int32_t height)
@@ -395,10 +633,17 @@ int loadpics(char  *filename, char * gamedir)
 }
 
 
-void TILE_MakeAvailable(short picID){
-    if (waloff[picID] == NULL)
+void TILE_MakeAvailable(short picID)
+{
+    if (waloff[picID] == NULL) {
+#ifdef DUKE3D_TILE_ASYNC_SPIKE
+        if (g_tile_sd_mutex_ready && tile_async_spike_runtime_enabled) {
+            if (tile_async_try_schedule(picID))
+                return;
+        }
+#endif
         loadtile(picID);
-
+    }
 }
 
 void copytilepiece(int32_t tilenume1, int32_t sx1, int32_t sy1, int32_t xsiz, int32_t ysiz,

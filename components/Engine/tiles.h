@@ -72,4 +72,15 @@ extern uint8_t  *pic ;
 
 void TILE_MakeAvailable(short picID);
 
+#ifdef DUKE3D_TILE_ASYNC_SPIKE
+#ifdef __cplusplus
+extern "C" {
+#endif
+void tile_async_spike_init(void);
+extern volatile int tile_async_spike_runtime_enabled;
+#ifdef __cplusplus
+}
+#endif
+#endif
+
 #endif
