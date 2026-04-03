@@ -28,6 +28,7 @@ Prepared for public release: 03/21/2003 - Charlie Wiederhold, 3D Realms
 #include "filesystem.h"
 #include "game.h"
 #include "duke3d_wifi_sync.h"
+#include "esp_task_wdt.h"
 
 
 extern uint8_t  everyothertime;
@@ -285,47 +286,62 @@ void precachenecessarysounds(void)
 }
 
 
-void cacheit(void)
+/* Mark wall/floor/ceiling and on-map sprite tiles (from loadboard state only).
+ * Used before prelevel() so docacheit() can pull them from SD early; spawn() and
+ * parallax setup then see waloff[] populated instead of hitting sync loadtile. */
+static void cacheit_mark_map_tiles(void)
 {
-    short i,j;
+    short i, j;
 
-    precachenecessarysounds();
+    for (i = 0; i < numwalls; i++)
+        if (waloff[wall[i].picnum] == NULL) {
+            if (waloff[wall[i].picnum] == NULL)
+                tloadtile(wall[i].picnum);
+            if (wall[i].overpicnum >= 0 && waloff[wall[i].overpicnum] == NULL)
+                tloadtile(wall[i].overpicnum);
+        }
 
-    cachegoodsprites();
-
-    for(i=0;i<numwalls;i++)
-        if( waloff[wall[i].picnum] == NULL)
-    {
-        if(waloff[wall[i].picnum] == NULL)
-            tloadtile(wall[i].picnum);
-        if(wall[i].overpicnum >= 0 && waloff[wall[i].overpicnum] == NULL )
-            tloadtile(wall[i].overpicnum);
-    }
-
-    for(i=0;i<numsectors;i++)
-    {
-        if( waloff[sector[i].floorpicnum] == NULL )
-            tloadtile( sector[i].floorpicnum );
-        if( waloff[sector[i].ceilingpicnum] == NULL )
-        {
-            tloadtile( sector[i].ceilingpicnum );
-            if( waloff[sector[i].ceilingpicnum] == (uint8_t*)LA)
-            {
-                tloadtile(LA+1);
-                tloadtile(LA+2);
+    for (i = 0; i < numsectors; i++) {
+        if (waloff[sector[i].floorpicnum] == NULL)
+            tloadtile(sector[i].floorpicnum);
+        if (waloff[sector[i].ceilingpicnum] == NULL) {
+            tloadtile(sector[i].ceilingpicnum);
+            if (waloff[sector[i].ceilingpicnum] == (uint8_t *)LA) {
+                tloadtile(LA + 1);
+                tloadtile(LA + 2);
             }
         }
 
         j = headspritesect[i];
-        while(j >= 0)
-        {
-            if(sprite[j].xrepeat != 0 && sprite[j].yrepeat != 0 && (sprite[j].cstat&32768) == 0)
-                if(waloff[sprite[j].picnum] == NULL)
+        while (j >= 0) {
+            if (sprite[j].xrepeat != 0 && sprite[j].yrepeat != 0 && (sprite[j].cstat & 32768) == 0)
+                if (waloff[sprite[j].picnum] == NULL)
                     cachespritenum(j);
             j = nextspritesect[j];
         }
     }
+}
 
+void cacheit(void)
+{
+    precachenecessarysounds();
+
+    cachegoodsprites();
+
+    cacheit_mark_map_tiles();
+}
+
+/* Between loadtile() calls, single-player getpackets() only runs sampletimer() and
+ * returns — no yield. Give the HUB75 / idle tasks CPU time during the level-load
+ * burst (hundreds of SD reads) and feed TWDT (normally reset each frame in Flip). */
+static void docacheit_after_tile_load(int32_t *pj)
+{
+    (*pj)++;
+    if (((*pj) & 7) == 0) getpackets();
+    if (((*pj) & 3) == 0) {
+        taskYIELD();
+        if (((*pj) & 31) == 0) esp_task_wdt_reset();
+    }
 }
 
 void docacheit(void)
@@ -338,8 +354,7 @@ void docacheit(void)
     for (i = 0; i < MAXTILES; i++) {
         if ((gotpic[i>>3] & (1<<(i&7))) && waloff[i] == NULL) {
             loadtile((short)i);
-            j++;
-            if ((j&7) == 0) getpackets();
+            docacheit_after_tile_load(&j);
         }
     }
 
@@ -353,8 +368,7 @@ void docacheit(void)
             for (k = 1; k <= nframes && (i + k) < MAXTILES; k++) {
                 if (waloff[i + k] == NULL) {
                     loadtile((short)(i + k));
-                    j++;
-                    if ((j & 7) == 0) getpackets();
+                    docacheit_after_tile_load(&j);
                 }
             }
         }
@@ -1558,6 +1572,12 @@ if (!VOLUMEONE)
     duke3d_notify_level_enter(g);
 
     clearbufbyte(gotpic,sizeof(gotpic),0L);
+
+    /* Eager tile load: .map geometry before spawn() / setupbackdrop — reduces SD
+     * stalls inside prelevel(). Second cacheit()+docacheit() after prelevel picks
+     * up HUD/sounds and tiles referenced only by spawned actors. */
+    cacheit_mark_map_tiles();
+    docacheit();
 
     prelevel(g);
 
