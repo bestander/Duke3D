@@ -944,7 +944,7 @@ IRAM_ATTR playbackstatus MV_GetNextWAVBlock
 
 /* Size of each ping-pong half in bytes.  Must be a power of two.  Larger
  * halves reduce underruns when the game task monopolizes SD/SPI for tiles. */
-#define MV_STREAM_HALF 4096
+#define MV_STREAM_HALF 2048
 
 #ifndef PLATFORM_DOS
 #include "mv_stream.h"

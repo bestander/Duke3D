@@ -150,12 +150,12 @@ int DPMI_UnlockMemoryRegion
 int DPMI_GetDOSMemory( void **ptr, int *descriptor, unsigned length )
 {
 	/* Lovely... */
-	
+
 	*ptr = (void *)malloc(length);
-	
+
 	*descriptor = (int) *ptr;
-	
-	return (descriptor == 0) ? DPMI_Error : DPMI_Ok;
+
+	return (*ptr == NULL) ? DPMI_Error : DPMI_Ok;
 }
 
 int DPMI_FreeDOSMemory( int descriptor )

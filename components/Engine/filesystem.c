@@ -499,11 +499,23 @@ void kclose(int32_t handle)
 
 
 
-/* Internal LZW variables */
+/* Internal LZW variables — allocated in PSRAM BSS so they never consume
+ * tile-cache space and cannot fragment it with permanent (lock≥200) entries.
+ * With 2MB PSRAM, adding ~120KB here is cheaper than losing that space from
+ * the 262KB tile cache on every level load.                                 */
 #define LZWSIZE 16384           /* Watch out for shorts! */
-static uint8_t  *lzwbuf1, *lzwbuf4, *lzwbuf5;
+static EXT_RAM_ATTR uint8_t  lzwbuf1_s[LZWSIZE + (LZWSIZE>>4)];
+static EXT_RAM_ATTR uint8_t  lzwbuf4_s[LZWSIZE];
+static EXT_RAM_ATTR uint8_t  lzwbuf5_s[LZWSIZE + (LZWSIZE>>4)];
+static EXT_RAM_ATTR short    lzwbuf2_s[(LZWSIZE + (LZWSIZE>>4)) * 2 / sizeof(short)];
+static EXT_RAM_ATTR short    lzwbuf3_s[(LZWSIZE + (LZWSIZE>>4)) * 2 / sizeof(short)];
+static uint8_t  *lzwbuf1 = lzwbuf1_s;
+static uint8_t  *lzwbuf4 = lzwbuf4_s;
+static uint8_t  *lzwbuf5 = lzwbuf5_s;
+static short    *lzwbuf2 = lzwbuf2_s;
+static short    *lzwbuf3 = lzwbuf3_s;
+/* lzwbuflock is kept for source compatibility but no longer used for allocache */
 static uint8_t  lzwbuflock[5];
-static short *lzwbuf2, *lzwbuf3;
 
 
 
@@ -616,23 +628,16 @@ void kdfread(void *buffer, size_t dasizeof, size_t count, int32_t fil)
 	short leng;
 	uint8_t  *ptr;
     
-	lzwbuflock[0] = lzwbuflock[1] = lzwbuflock[2] = lzwbuflock[3] = lzwbuflock[4] = 200;
-	if (lzwbuf1 == NULL) allocache(&lzwbuf1,LZWSIZE+(LZWSIZE>>4),&lzwbuflock[0]);
-	if (lzwbuf2 == NULL) allocache((uint8_t**)&lzwbuf2,(LZWSIZE+(LZWSIZE>>4))*2,&lzwbuflock[1]);
-	if (lzwbuf3 == NULL) allocache((uint8_t**)&lzwbuf3,(LZWSIZE+(LZWSIZE>>4))*2,&lzwbuflock[2]);
-	if (lzwbuf4 == NULL) allocache(&lzwbuf4,LZWSIZE,&lzwbuflock[3]);
-	if (lzwbuf5 == NULL) allocache(&lzwbuf5,LZWSIZE+(LZWSIZE>>4),&lzwbuflock[4]);
-    
 	if (dasizeof > LZWSIZE) { count *= dasizeof; dasizeof = 1; }
 	ptr = (uint8_t  *)buffer;
-    
+
 	kread(fil,&leng,2); kread(fil,lzwbuf5,(int32_t )leng);
 	k = 0;
 	kgoal = uncompress(lzwbuf5,leng,lzwbuf4);
-    
+
 	copybufbyte(lzwbuf4,ptr,(int32_t )dasizeof);
 	k += (int32_t )dasizeof;
-    
+
 	for(i=1;i<count;i++)
 	{
 		if (k >= kgoal)
@@ -644,7 +649,6 @@ void kdfread(void *buffer, size_t dasizeof, size_t count, int32_t fil)
 		k += dasizeof;
 		ptr += dasizeof;
 	}
-	lzwbuflock[0] = lzwbuflock[1] = lzwbuflock[2] = lzwbuflock[3] = lzwbuflock[4] = 1;
 }
 
 void dfread(void *buffer, size_t dasizeof, size_t count, FILE *fil)
@@ -653,14 +657,7 @@ void dfread(void *buffer, size_t dasizeof, size_t count, FILE *fil)
 	int32_t k, kgoal;
 	short leng;
 	uint8_t  *ptr;
-    
-	lzwbuflock[0] = lzwbuflock[1] = lzwbuflock[2] = lzwbuflock[3] = lzwbuflock[4] = 200;
-	if (lzwbuf1 == NULL) allocache(&lzwbuf1,LZWSIZE+(LZWSIZE>>4),&lzwbuflock[0]);
-	if (lzwbuf2 == NULL) allocache((uint8_t**)&lzwbuf2,(LZWSIZE+(LZWSIZE>>4))*2,&lzwbuflock[1]);
-	if (lzwbuf3 == NULL) allocache((uint8_t**)&lzwbuf3,(LZWSIZE+(LZWSIZE>>4))*2,&lzwbuflock[2]);
-	if (lzwbuf4 == NULL) allocache(&lzwbuf4,LZWSIZE,&lzwbuflock[3]);
-	if (lzwbuf5 == NULL) allocache(&lzwbuf5,LZWSIZE+(LZWSIZE>>4),&lzwbuflock[4]);
-    
+
 	if (dasizeof > LZWSIZE) {
         count *= dasizeof;
         dasizeof = 1;
@@ -688,7 +685,7 @@ void dfread(void *buffer, size_t dasizeof, size_t count, FILE *fil)
 		k += dasizeof;
 		ptr += dasizeof;
 	}
-	lzwbuflock[0] = lzwbuflock[1] = lzwbuflock[2] = lzwbuflock[3] = lzwbuflock[4] = 1;
+
 	SDL_UnlockDisplay();
 }
 
@@ -697,13 +694,6 @@ void dfwrite(void *buffer, size_t dasizeof, size_t count, FILE *fil)
 	size_t i, j, k;
 	short leng;
 	uint8_t  *ptr;
-    
-	lzwbuflock[0] = lzwbuflock[1] = lzwbuflock[2] = lzwbuflock[3] = lzwbuflock[4] = 200;
-	if (lzwbuf1 == NULL) allocache(&lzwbuf1,LZWSIZE+(LZWSIZE>>4),&lzwbuflock[0]);
-	if (lzwbuf2 == NULL) allocache((uint8_t**)&lzwbuf2,(LZWSIZE+(LZWSIZE>>4))*2,&lzwbuflock[1]);
-	if (lzwbuf3 == NULL) allocache((uint8_t**)&lzwbuf3,(LZWSIZE+(LZWSIZE>>4))*2,&lzwbuflock[2]);
-	if (lzwbuf4 == NULL) allocache(&lzwbuf4,LZWSIZE,&lzwbuflock[3]);
-	if (lzwbuf5 == NULL) allocache(&lzwbuf5,LZWSIZE+(LZWSIZE>>4),&lzwbuflock[4]);
     
 	if (dasizeof > LZWSIZE) { count *= dasizeof; dasizeof = 1; }
 	ptr = (uint8_t  *)buffer;
@@ -733,7 +723,7 @@ void dfwrite(void *buffer, size_t dasizeof, size_t count, FILE *fil)
 		leng = (short)compress(lzwbuf4,k,lzwbuf5);
 		fwrite(&leng,2,1,fil); fwrite(lzwbuf5,(int32_t )leng,1,fil);
 	}
-	lzwbuflock[0] = lzwbuflock[1] = lzwbuflock[2] = lzwbuflock[3] = lzwbuflock[4] = 1;
+
 	SDL_UnlockDisplay();
 }
 

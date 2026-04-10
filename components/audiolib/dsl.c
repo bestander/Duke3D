@@ -31,6 +31,8 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 
 /* MV_MixPage is incremented and mixed into by MV_ServiceVoc */
@@ -168,11 +170,12 @@ int DSL_BeginBufferedPlayback(char *BufferStart, int BufferSize, int NumDivision
              SampleRate, MixMode, NumDivisions, _BufferSize);
 
     /* Pin to Core 0 — game task runs on Core 1 at priority 5; keeping audio on
-     * Core 1 at priority 4 means audio is completely starved whenever the game
-     * task runs without blocking.  Core 0 is idle during gameplay (WiFi is
-     * suspended), so audio gets its own CPU with no priority competition.     */
-    if (xTaskCreatePinnedToCore(audio_pump_task, "duke_audio",
-                                4096, NULL, 4, &g_audio_task, 0) != pdPASS) {
+     * Core 0 means audio gets its own CPU with no priority competition.
+     * Stack allocated from PSRAM to avoid exhausting internal RAM (BT host
+     * threads + WiFi + Hub75 DMA already consume most internal RAM).         */
+    if (xTaskCreatePinnedToCoreWithCaps(audio_pump_task, "duke_audio",
+                                        4096, NULL, 4, &g_audio_task, 0,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         ESP_LOGE(TAG, "failed to create audio pump task");
         DSL_SetErrorCode(DSL_MixerInitFailure);
         return DSL_Error;
