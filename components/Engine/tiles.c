@@ -16,6 +16,11 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 
+// Per-column buffer for streaming downscale — 512 bytes in internal SRAM.
+// Covers orig_h up to 512; never touches PSRAM heap.
+#define DOWNSCALE_COL_BUF 512
+static uint8_t s_col_buf[DOWNSCALE_COL_BUF];
+
 // Per-frame diagnostic counters — read and reset by spi_lcd_send_boarder() each frame.
 volatile int32_t diag_tile_loads = 0;   // number of loadtile() calls this frame
 volatile int32_t diag_tile_bytes = 0;   // bytes read from SD this frame
@@ -135,6 +140,12 @@ void loadtile(short tilenume)
     if ((uint32_t)tilenume >= (uint32_t)MAXTILES)
         return;
 
+    // Flash-mapped tile or already-cached tile: waloff is pre-set, nothing to do.
+    // This also prevents any write path (kread, memset, downscale) from touching
+    // read-only flash-mapped memory.
+    if (waloff[tilenume] != NULL)
+        return;
+
     int32_t orig_w = tiles[tilenume].dim.width;
     int32_t orig_h = tiles[tilenume].dim.height;
     tileFilesize = orig_w * orig_h;
@@ -171,14 +182,10 @@ void loadtile(short tilenume)
     if (new_w < 1) new_w = 1;
     if (new_h < 1) new_h = 1;
 
-    // Decide whether to downscale. If yes, try to borrow a temp buffer from
-    // the PSRAM heap for the full-size read; fall back to full-size if OOM.
     int32_t do_scale = (new_w != orig_w || new_h != orig_h);
-    uint8_t *tmp_buf = NULL;
-    if (do_scale) {
-        tmp_buf = (uint8_t*)heap_caps_malloc(tileFilesize,
-                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!tmp_buf) do_scale = 0;  // OOM — fall back to full-size direct read
+    if (do_scale && orig_h > DOWNSCALE_COL_BUF) {
+        printf("loadtile: tile %d orig_h=%d exceeds col buf, skipping\n", tilenume, orig_h);
+        return;
     }
 
     int32_t cacheBytes = do_scale ? (new_w * new_h) : tileFilesize;
@@ -219,26 +226,23 @@ void loadtile(short tilenume)
         int64_t _t0 = esp_timer_get_time();
 
         if (!do_scale) {
-            // No downscaling — read directly into cache slot.
             kread(artfil, waloff[tilenume], tileFilesize);
         } else {
-            // Read full tile into PSRAM temp buffer, then nearest-neighbour
-            // downsample into the (smaller) cache slot.
-            // Tile data is column-major: index = x * orig_h + y.
-            kread(artfil, tmp_buf, tileFilesize);
-            uint8_t *dst = waloff[tilenume];
-            for (int32_t x = 0; x < new_w; x++) {
-                int32_t sx = (x * orig_w) / new_w;
-                for (int32_t y = 0; y < new_h; y++) {
-                    int32_t sy = (y * orig_h) / new_h;
-                    dst[x * new_h + y] = tmp_buf[sx * orig_h + sy];
+            // Stream one source column at a time into s_col_buf, write only the
+            // columns needed for the nearest-neighbour downscale output.
+            // Tile data is column-major: source column sx occupies bytes [sx*orig_h .. (sx+1)*orig_h).
+            for (int32_t sx = 0; sx < orig_w; sx++) {
+                kread(artfil, s_col_buf, orig_h);
+                int32_t cx = (sx * new_w) / orig_w;
+                if (cx >= new_w) continue;
+                // Only write if this source column is the canonical source for cx
+                if ((cx * orig_w) / new_w != sx) continue;
+                uint8_t *dst_col = waloff[tilenume] + cx * new_h;
+                for (int32_t ry = 0; ry < new_h; ry++) {
+                    dst_col[ry] = s_col_buf[(ry * orig_h) / new_h];
                 }
             }
-            free(tmp_buf);
-
-            // Update picsiz so the renderer uses the right coordinate mask.
-            // tiles[tilenume].dim is intentionally left at original values so
-            // tileFilesize is correct on re-load and sprite screen-sizing is unchanged.
+            // Update picsiz coordinate mask for downscaled dimensions.
             {
                 int32_t pw = 0, ph = 0, w = new_w, h = new_h;
                 while (w > 1) { pw++; w >>= 1; }
@@ -361,15 +365,25 @@ int loadpics(char  *filename, char * gamedir)
     
     clearbuf(gotpic,(MAXTILES+31)>>5,0L);
 
-    // Allocate art cache from PSRAM — internal DRAM is fragmented after WiFi/SD/HUB75.
-    // Cap at 256KB: sounds now live in a separate PSRAM heap pool (loadsound/clearsoundlocks
-    // in sounds.c use heap_caps_malloc). Leaving ~200KB+ PSRAM heap free for sound buffers.
+    // Allocate art cache from PSRAM.
+    // With DUKE3D_FLASH_TILES: tiles are mmap'd from flash and don't consume
+    // cache space. The cache is still used for sounds (up to ~34KB each) and
+    // other runtime allocations, so it must be large enough to hold the
+    // largest sound file. 128KB gives comfortable headroom while leaving
+    // ~300KB+ PSRAM free for other uses.
+    // Without: cap at 256KB leaving ~200KB+ free for sound buffers.
+#ifdef DUKE3D_FLASH_TILES
+    cachesize = 128 * 1024;
+    pic = (uint8_t*)heap_caps_malloc(cachesize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!pic) return(-1);
+#else
     cachesize = 256 * 1024;
     while ((pic = (uint8_t*)heap_caps_malloc(cachesize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)) == NULL)
     {
         cachesize -= 64 * 1024;
         if (cachesize < 65536) return(-1);
     }
+#endif
     initcache(pic,cachesize);
     
     for(i=0; i<MAXTILES; i++)

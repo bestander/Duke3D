@@ -933,18 +933,18 @@ IRAM_ATTR playbackstatus MV_GetNextWAVBlock
    ping-pong buffer before the mix period (the active half is still being
    mixed); MV_GetNextStreamBlock() swaps halves with no I/O.
 
-   Half size is MV_STREAM_HALF bytes (4096).  At 8000 Hz each half covers
-   ~512 ms; two halves ≈ 1 s pre-buffered, improving survival of long SD
+   Half size is MV_STREAM_HALF bytes (1024).  At 8000 Hz each half covers
+   ~128 ms; two halves ≈ 256 ms pre-buffered, improving survival of SD
    stalls when many streams compete for the GRP mutex.  Short sounds
    (< 2×MV_STREAM_HALF bytes) are fully filled at voice start so no prefetch
    reads are needed during playback.
 
-   8 voices × 2 × MV_STREAM_HALF = 64 KB PSRAM (see MV_Init stream_buf).
+   8 voices × 2 × MV_STREAM_HALF = 16 KB PSRAM (see MV_Init stream_buf).
 ---------------------------------------------------------------------*/
 
 /* Size of each ping-pong half in bytes.  Must be a power of two.  Larger
  * halves reduce underruns when the game task monopolizes SD/SPI for tiles. */
-#define MV_STREAM_HALF 2048
+#define MV_STREAM_HALF 1024
 
 #ifndef PLATFORM_DOS
 #include "mv_stream.h"

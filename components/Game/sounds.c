@@ -931,14 +931,10 @@ void clearsoundlocks(void)
 
     for(i=0;i<NUM_SOUNDS;i++)
     {
-        /* Free PSRAM-allocated sound buffers that are not currently playing.
-         * num > 0 means at least one active voice is streaming from ptr — keep those.
-         * Next play will reload from SD via loadsound() when ptr == 0. */
-        if (Sound[i].ptr != 0 && Sound[i].num == 0)
-        {
-            heap_caps_free(Sound[i].ptr);
-            Sound[i].ptr = 0;
-        }
+        /* Zero ptr to force fresh loadsound() on next play; do NOT free —
+         * heap_caps_free crashes here (heap corruption by the time clearsoundlocks
+         * runs). Accept the PSRAM leak; each loadsound overwrites the slot anyway. */
+        Sound[i].ptr = 0;
         Sound[i].lock = 199;
     }
 

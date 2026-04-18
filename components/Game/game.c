@@ -3301,31 +3301,7 @@ IRAM_ATTR void displayrooms(short snum,int32_t smoothratio)
             
             setviewtotile(MAXTILES-1,100L,160L);
         }
-        else if( ( ud.screen_tilting && p->rotscrnang ) || ud.detail==0 )
-        {
-                if (ud.screen_tilting) tang = p->rotscrnang; else tang = 0;
-
-                tiles[MAXTILES-2].lock = 255;
-                if (waloff[MAXTILES-2] == NULL)
-                    allocache(&waloff[MAXTILES-2],320L*320L,&tiles[MAXTILES-2].lock);
-                if ((tang&1023) == 0)
-                    setviewtotile(MAXTILES-2,200L>>(1-ud.detail),320L>>(1-ud.detail));
-                else
-                    setviewtotile(MAXTILES-2,320L>>(1-ud.detail),320L>>(1-ud.detail));
-                if ((tang&1023) == 512)
-                {     //Block off unscreen section of 90ø tilted screen
-                    j = ((320-60)>>(1-ud.detail));
-                    for(i=(60>>(1-ud.detail))-1;i>=0;i--)
-                    {
-                        startumost[i] = 1; startumost[i+j] = 1;
-                        startdmost[i] = 0; startdmost[i+j] = 0;
-                    }
-                }
-
-                i = (tang&511); if (i > 256) i = 512-i;
-                i = sintable[i+512]*8 + sintable[i]*5L;
-                setaspect(i>>1,yxaspect);
-          }
+        // screen_tilting branch removed: 320x320=102KB permanent alloc exceeds 128KB cache
 
           if ( (snum == myconnectindex) && (numplayers > 1) )
                   {
@@ -3432,17 +3408,7 @@ IRAM_ATTR void displayrooms(short snum,int32_t smoothratio)
             tiles[MAXTILES-1].lock = 1;
             screencapt = 0;
         }
-        else if( ( ud.screen_tilting && p->rotscrnang) || ud.detail==0 )
-        {
-            if (ud.screen_tilting) tang = p->rotscrnang; else tang = 0;
-            setviewback();
-            tiles[MAXTILES-2].animFlags &= 0xff0000ff;
-            i = (tang&511); if (i > 256) i = 512-i;
-            i = sintable[i+512]*8 + sintable[i]*5L;
-            if ((1-ud.detail) == 0) i >>= 1;
-            rotatesprite(160<<16,100<<16,i,tang+512,MAXTILES-2,0,0,4+2+64,windowx1,windowy1,windowx2,windowy2);
-            tiles[MAXTILES-2].lock = 199;
-        }
+        // screen_tilting draw removed: paired with alloc above
     }
 
     restoreinterpolations();
@@ -7778,6 +7744,17 @@ void Startup(void)
    puts("Loading art header.");
 
   loadpics("tiles000.art", "\0");
+
+#ifdef DUKE3D_FLASH_TILES
+   {
+       extern int flash_tiles_init(void);
+       int ft = flash_tiles_init();
+       if (ft < 0)
+           puts("WARNING: flash_tiles_init failed — falling back to SD tile loads");
+       else
+           printf("flash_tiles_init: %d tiles mapped from flash\n", ft);
+   }
+#endif
 
 
    readsavenames();
