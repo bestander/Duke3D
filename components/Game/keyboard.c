@@ -104,6 +104,21 @@ void KB_KeyEvent( int scancode, int keypressed )
 	STUBBED("KB_KeyEvent");
 }
 
+void KB_InjectScanCode(int scancode, int keypressed)
+{
+    if (scancode < 0 || scancode >= MAXKEYBOARDSCAN) {
+        return;
+    }
+
+    if (keypressed) {
+        KB_LastScan = (kb_scancode) scancode;
+        keyIsWaiting = true;
+    }
+
+    KB_KeyDown[scancode] = keypressed ? 1 : 0;
+    CONTROL_UpdateKeyboardState(scancode, keypressed ? 1 : 0);
+}
+
 int KB_KeyWaiting( void )
 {
     _handle_events();

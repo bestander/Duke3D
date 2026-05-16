@@ -129,6 +129,8 @@ char *SDL_VideoDriverName(char *namebuf, int maxlen);
 extern SemaphoreHandle_t display_mutex;
 void SDL_LockDisplay();
 void SDL_UnlockDisplay();
+/** If the current task holds display_mutex (e.g. mid-file op), release once — used before demo reload longjmp. */
+void SDL_ReleaseDisplayMutexIfHeld(void);
 
 typedef unsigned char  JE_byte;
 //extern JE_byte ** allocateTwoDimenArrayOnHeapUsingMalloc(int row, int col);

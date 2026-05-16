@@ -205,6 +205,7 @@ extern kb_scancode KB_LastScan;
 */
 
 void KB_KeyEvent( int scancode, int keypressed );  // Interprets scancodes
+void KB_InjectScanCode(int scancode, int keypressed); // External keyboard injector (UART bridge)
 int KB_KeyWaiting( void );         // Checks if a character is waiting in the keyboard queue
 uint8_t     KB_Getch( void );              // Gets the next keypress
 void    KB_Addch( uint8_t  ch );           // Adds key to end of queue

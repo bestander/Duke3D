@@ -256,3 +256,16 @@ void SDL_UnlockDisplay()
     //printf("U ");
     //taskYIELD();
 }
+
+void SDL_ReleaseDisplayMutexIfHeld(void)
+{
+    if (!display_mutex) {
+        return;
+    }
+#if defined(INCLUDE_xSemaphoreGetMutexHolder) && (INCLUDE_xSemaphoreGetMutexHolder == 1)
+    TaskHandle_t holder = xSemaphoreGetMutexHolder(display_mutex);
+    if (holder != NULL && holder == xTaskGetCurrentTaskHandle()) {
+        xSemaphoreGive(display_mutex);
+    }
+#endif
+}
