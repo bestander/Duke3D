@@ -8308,7 +8308,16 @@ void makepalookup(int32_t palnum, uint8_t  *remapbuf, int8_t r,
          * falling into the evictable cache, which left palookup[] NULL at render after reloads. */
         palookup[palnum] = (uint8_t  *)heap_caps_malloc(numpalookups<<8, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (palookup[palnum] == NULL)
-            allocache((int32_t *)&palookup[palnum],numpalookups<<8,&permanentlock);
+        {
+            /* PSRAM exhausted (happens after several cooperative reloads when a level builds
+             * many palswaps — up to 32 * (numpalookups<<8) bytes). Do NOT fall back to
+             * allocache(): the shared sound/tile cache is only 128KB and a permanent-locked
+             * palette there starves sound precaching ("CACHE SPACE ALL LOCKED UP" abort in
+             * getsound/precachenecessarysounds). Leave this non-base palette unbuilt — every
+             * renderer guards `if (!palookup[pal]) pal = 0` and falls back to palookup[0], so
+             * the worst case is a missing palette tint, never a crash. */
+            return;
+        }
     }
 
     if (dastat == 0) return;
