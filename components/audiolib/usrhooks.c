@@ -31,6 +31,20 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include <stdlib.h>
 #include "usrhooks.h"
 
+#if defined(ESP_PLATFORM)
+#include "esp_heap_caps.h"
+#endif
+
+#if defined(ESP_PLATFORM)
+static void *usrhooks_alloc(uint32_t size)
+{
+   void *memory = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+   if (memory == NULL)
+      memory = heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+   return memory;
+}
+#endif
+
 
 /*---------------------------------------------------------------------
    Function: USRHOOKS_GetMem
@@ -49,7 +63,11 @@ int USRHOOKS_GetMem
    {
    void *memory;
 
+#if defined(ESP_PLATFORM)
+   memory = usrhooks_alloc( size );
+#else
    memory = malloc( size );
+#endif
    if ( memory == NULL )
       {
       return( USRHOOKS_Error );

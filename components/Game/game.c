@@ -55,6 +55,8 @@ Prepared for public release: 03/21/2003 - Charlie Wiederhold, 3D Realms
 
 #include "global.h"
 
+#include "dukesp_hooks.h"
+
 #include "SDL.h"
 #include "esp_attr.h"
 
@@ -7367,6 +7369,14 @@ void checkcommandline(int argc,char  **argv)
                         printf("Play demo %s.\n",c);
                         strcpy(firstdemofile,c);
                         break;
+                    case 'e':
+                    case 'E':
+                        c++;
+                        if (*c == 'r' || *c == 'R') {
+                            dukesp_set_kiosk_demo_record(1);
+                            puts("ESP kiosk: resume demo shell after next demo write (/er).");
+                        }
+                        break;
                     case 'l':
                     case 'L':
                         ud.warp_on = 1;
@@ -8045,6 +8055,13 @@ int dukeGRP_Match(char* filename,int length)
 
 
 #include <dirent.h>
+#include "esp_timer.h"
+
+static int64_t findgrp_diag_ms(void)
+{
+    return (int64_t)(esp_timer_get_time() / 1000);
+}
+
 void findGRPToUse(char * groupfilefullpath){
     
     char directoryToScan[512];
@@ -8063,9 +8080,14 @@ void findGRPToUse(char * groupfilefullpath){
     }
     
     printf("Scanning directory '%s' for a GRP file like '%s'.\n",directoryToScan,baseDir);
-    SDL_LockDisplay();    
+    printf("[findGRP] t=%lldms BEFORE SDL_LockDisplay\n", (long long)findgrp_diag_ms());
+    fflush(stdout);
+    SDL_LockDisplay();
+    printf("[findGRP] t=%lldms AFTER SDL_LockDisplay\n", (long long)findgrp_diag_ms());
+    fflush(stdout);
     DIR* dir =  opendir(directoryToScan);
-    printf("opendir %p\n", dir);
+    printf("[findGRP] t=%lldms AFTER opendir dir=%p\n", (long long)findgrp_diag_ms(), (void *)dir);
+    fflush(stdout);
 
     if (directoryToScan[strlen(directoryToScan)-1] != '/')
         strcat(directoryToScan,"/");
@@ -8568,6 +8590,13 @@ int main(int argc,char  **argv)
         displayrooms(screenpeek,i);
         displayrest(i);
 
+        /* ESP kiosk: if the live player stays dead ~10s, hard-restart back to the demo loop.
+         * Only counts during live play — demo playback (MODE_DEMO / recstat==2) may show a
+         * recorded death and must not trigger a reboot. */
+        dukesp_player_death_tick(
+            ((ps[myconnectindex].gm & MODE_DEMO) == 0) && (ud.recstat != 2) &&
+            (ps[myconnectindex].dead_flag != 0));
+
         if(ps[myconnectindex].gm&MODE_DEMO)
             goto MAIN_LOOP_RESTART;
 
@@ -8736,7 +8765,9 @@ void opendemowrite(void)
     SDL_LockDisplay();
 // CTW - MODIFICATION
 //  if ((frecfilep = fopen(d,"wb")) == -1) return;
-    if ((frecfilep = fopen(fullpathdemofilename,"wb")) == NULL) return;
+    // Must release the display lock before bailing — an early return while
+    // holding it self-deadlocks the next SDL_LockDisplay() for 60s (watchdog).
+    if ((frecfilep = fopen(fullpathdemofilename,"wb")) == NULL) { SDL_UnlockDisplay(); return; }
 // CTW END - MODIFICATION
     fwrite(&dummylong,4,1,frecfilep);
     fwrite(&ver,sizeof(uint8_t ),1,frecfilep);
@@ -8786,9 +8817,12 @@ void record(void)
 
 void closedemowrite(void)
 {
+    int recording_finalized = 0;
+
     SDL_LockDisplay();
     if (ud.recstat == 1)
     {
+        recording_finalized = 1;
         if (ud.reccnt > 0)
         {
             dfwrite(recsync,sizeof(input)*ud.multimode,ud.reccnt/ud.multimode,frecfilep);
@@ -8801,6 +8835,9 @@ void closedemowrite(void)
         frecfilep = NULL;
     }
     SDL_UnlockDisplay();
+
+    if (recording_finalized)
+        dukesp_maybe_jump_after_demo_write_closed();
 }
 
 // CTW - MODIFICATION

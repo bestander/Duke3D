@@ -159,7 +159,9 @@ static void SoundIndexGRP(void)
 
     /* Allocate directory buffer temporarily */
     size_t dir_bytes = (size_t)num_files * 16;
-    uint8_t *dir = (uint8_t *)malloc(dir_bytes);
+    uint8_t *dir = (uint8_t *)heap_caps_malloc(dir_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!dir)
+        dir = (uint8_t *)malloc(dir_bytes);
     if (!dir) { ESP_LOGE(SND_TAG, "SoundIndexGRP: OOM for dir"); fclose(f); return; }
 
     if (fread(dir, 1, dir_bytes, f) != dir_bytes) {
@@ -434,7 +436,13 @@ void MusicShutdown( void )
 
 int USRHOOKS_GetMem(void  **ptr, uint32_t size )
 {
+#if defined(ESP_PLATFORM)
+   *ptr = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+   if (*ptr == NULL)
+      *ptr = heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+#else
    *ptr = malloc(size);
+#endif
 
    if (*ptr == NULL)
       return(USRHOOKS_Error);

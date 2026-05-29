@@ -1,5 +1,6 @@
 #include "multivoc.h"
 #include "_multivc.h"
+#include "esp_heap_caps.h"
 
 extern double *MV_FooBuffer;
 extern int MV_BufferSize;
@@ -71,9 +72,28 @@ static void check_buffer()
 		FB_X = 0.646484375;
 		IN_COEF_L = -2.;
 		IN_COEF_R = -2.;
-		if (reverbBuffer) reverbBuffer = (double*) realloc(reverbBuffer, new_delay * sizeof(double));
-		else reverbBuffer = (double*) malloc(new_delay * sizeof(double));
-		memset(reverbBuffer, 0, new_delay * sizeof(double));
+		/* The reverb buffer is ~56KB (14320 delay -> 7160 doubles). Allocate it from PSRAM:
+		 * plain malloc() draws from the tiny internal DRAM heap (~50KB, mostly used) and fails
+		 * after a couple of cooperative reloads -> the OOM path below used to printf() from the
+		 * audio task, and printf() under memory pressure abort()s in the newlib lock acquire
+		 * (lock_acquire_generic). PSRAM has hundreds of KB free, matching the rest of the engine.
+		 *
+		 * realloc() returns NULL without freeing the old block, so keep reverbBuffer until we
+		 * know the (re)alloc succeeded — a NULL previously fell into memset(NULL,...) -> crash. */
+		size_t want = (size_t)new_delay * sizeof(double);
+		double *newBuffer = reverbBuffer
+			? (double*) heap_caps_realloc(reverbBuffer, want, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+			: (double*) heap_caps_malloc(want, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+		if (!newBuffer) {
+			/* Still OOM: skip reverb this pass. MV_FPReverb() bails when delay==0; if we already
+			 * had a valid buffer, keep it (old delay stays) so audio keeps working w/o reverb.
+			 * NEVER printf() here — this runs in the audio task many times/sec and printf() can
+			 * abort() under OOM. Stay silent; reverb is a non-essential effect. */
+			if (!reverbBuffer) delay = 0;
+			return;
+		}
+		reverbBuffer = newBuffer;
+		memset(reverbBuffer, 0, want);
 		delay = new_delay;
 		CurrAddr = 0;
 	}
@@ -209,8 +229,9 @@ IRAM_ATTR void MV_FPReverb(int volume)
 	// DAVE
 	if(delay == 0)
 	{
-		//get out now!!!
-		printf("Error! MV_FPReverb() delay==0\n");
+		// get out now!!! No buffer (reverb disabled / OOM). Must NOT printf() here:
+		// this runs in the audio task per buffer and printf() under OOM abort()s.
+		SDL_mutexV(reverbMutex);
 		return;
 	}
 

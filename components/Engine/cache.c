@@ -77,10 +77,21 @@ EXT_RAM_ATTR int32_t lockrecip[200];
 // Note: avoid C escape sequences in string literals; "\0" terminator is implicit.
 char  game_dir[512] = { "/sdcard/duke3d" };
 
+void resetcache(void)
+{
+	cachestart = NULL;
+	cachesize = 0;
+	cacnum = 0;
+	agecount = 0;
+	cachecount = 0;
+}
+
 void initcache(uint8_t* dacachestart, int32_t dacachesize)
 {
 	printf("Initcache: %d bytes, at: %p\n",dacachesize, dacachestart);
 	int32_t i;
+
+	resetcache();
 
 	for(i=1;i<200;i++) lockrecip[i] = (1<<28)/(200-i);
 
@@ -89,6 +100,7 @@ void initcache(uint8_t* dacachestart, int32_t dacachesize)
 
 	cac[0].leng = cachesize;
 	cac[0].lock = &zerochar;
+	cac[0].hand = NULL;
 	cacnum = 1;
 }
 

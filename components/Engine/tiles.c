@@ -375,7 +375,11 @@ int loadpics(char  *filename, char * gamedir)
 #ifdef DUKE3D_FLASH_TILES
     cachesize = 128 * 1024;
     pic = (uint8_t*)heap_caps_malloc(cachesize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!pic) return(-1);
+    if (!pic) {
+        printf("loadpics: art cache OOM (%d bytes PSRAM)\n", cachesize);
+        resetcache();
+        return(-1);
+    }
 #else
     cachesize = 256 * 1024;
     while ((pic = (uint8_t*)heap_caps_malloc(cachesize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)) == NULL)

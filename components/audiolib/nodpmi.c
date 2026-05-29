@@ -32,6 +32,10 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include <string.h>
 #include "dpmi.h"
 
+#if defined(ESP_PLATFORM)
+#include "esp_heap_caps.h"
+#endif
+
 #define TRUE  ( 1 == 1 )
 #define FALSE ( !TRUE )
 
@@ -149,9 +153,14 @@ int DPMI_UnlockMemoryRegion
 
 int DPMI_GetDOSMemory( void **ptr, int *descriptor, unsigned length )
 {
-	/* Lovely... */
-
+#if defined(ESP_PLATFORM)
+	void *memory = heap_caps_malloc(length, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+	if (memory == NULL)
+		memory = heap_caps_malloc(length, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+	*ptr = memory;
+#else
 	*ptr = (void *)malloc(length);
+#endif
 
 	*descriptor = (int) *ptr;
 

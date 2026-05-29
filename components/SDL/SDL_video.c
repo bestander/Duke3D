@@ -231,13 +231,16 @@ void SDL_LockDisplay()
     if (display_mutex == NULL)
     {
         printf("Creating display mutex.\n");
-        display_mutex = xSemaphoreCreateMutex();
+        // Recursive: only the duke3d task ever locks the display. A non-recursive
+        // mutex turns any unbalanced lock (early return / longjmp reload) into a
+        // 60s self-deadlock + task watchdog reboot on the next lock. Recursive
+        // re-acquire by the owning task always succeeds.
+        display_mutex = xSemaphoreCreateRecursiveMutex();
         if (!display_mutex) 
             abort();
-        //xSemaphoreGive(display_mutex);
     }
 
-    if (!xSemaphoreTake(display_mutex, 60000 / portTICK_PERIOD_MS))
+    if (!xSemaphoreTakeRecursive(display_mutex, 60000 / portTICK_PERIOD_MS))
     {
         printf("Timeout waiting for display lock.\n");
         abort();
@@ -250,7 +253,7 @@ void SDL_UnlockDisplay()
 {
     if (!display_mutex) 
         abort();
-    if (!xSemaphoreGive(display_mutex))
+    if (!xSemaphoreGiveRecursive(display_mutex))
         abort();
 
     //printf("U ");
@@ -260,12 +263,27 @@ void SDL_UnlockDisplay()
 void SDL_ReleaseDisplayMutexIfHeld(void)
 {
     if (!display_mutex) {
+        printf("[display_mtx] release skip: mutex never created\n");
+        fflush(stdout);
         return;
     }
 #if defined(INCLUDE_xSemaphoreGetMutexHolder) && (INCLUDE_xSemaphoreGetMutexHolder == 1)
-    TaskHandle_t holder = xSemaphoreGetMutexHolder(display_mutex);
-    if (holder != NULL && holder == xTaskGetCurrentTaskHandle()) {
-        xSemaphoreGive(display_mutex);
+    TaskHandle_t self = xTaskGetCurrentTaskHandle();
+    // Recursive mutex: fully unwind any depth held by this task so the next
+    // engine run (post-longjmp) starts with the lock free.
+    int released = 0;
+    while (xSemaphoreGetMutexHolder(display_mutex) == self) {
+        if (!xSemaphoreGiveRecursive(display_mutex))
+            break;
+        released++;
     }
+    if (released > 0)
+        printf("[display_mtx] released %d recursive hold(s) by current task\n", released);
+    else
+        printf("[display_mtx] NOT released: holder=%p self=%p\n",
+               (void *)xSemaphoreGetMutexHolder(display_mutex), (void *)self);
+#else
+    printf("[display_mtx] NOT released: INCLUDE_xSemaphoreGetMutexHolder disabled\n");
 #endif
+    fflush(stdout);
 }

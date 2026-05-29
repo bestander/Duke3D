@@ -100,6 +100,10 @@ int32_t initgroupfile(const char  *filename)
         (buf[6] != 'v') || (buf[7] != 'e') || (buf[8] != 'r') ||
         (buf[9] != 'm') || (buf[10] != 'a') || (buf[11] != 'n')){
         printf("Error: File %s is not a GRP archive.\n",filename);
+        close(archive->fileDescriptor);
+        archive->fileDescriptor = -1;
+        SDL_UnlockDisplay();
+        memset(archive, 0, sizeof(grpArchive_t));
         return(-1);
     }
     
@@ -108,11 +112,33 @@ int32_t initgroupfile(const char  *filename)
     
     // The next 4 bytes of the header feature the number of files in the GRP archive.
     archive->numFiles = BUILDSWAP_INTEL32(*((int32_t *)&buf[12]));
+    if (archive->numFiles <= 0 || archive->numFiles > 65536) {
+        printf("Error: File %s has invalid file count %d.\n", filename, (int) archive->numFiles);
+        close(archive->fileDescriptor);
+        archive->fileDescriptor = -1;
+        SDL_UnlockDisplay();
+        memset(archive, 0, sizeof(grpArchive_t));
+        return (-1);
+    }
     
     
     archive->gfilelist = kmalloc(archive->numFiles * sizeof(grpIndexEntry_t));
     archive->fileOffsets = kmalloc(archive->numFiles * sizeof(int32_t));
     archive->filesizes = kmalloc(archive->numFiles * sizeof(int32_t));
+    if (!archive->gfilelist || !archive->fileOffsets || !archive->filesizes) {
+        printf("Error: Out of memory allocating GRP index (%d files).\n", (int) archive->numFiles);
+        free(archive->gfilelist);
+        free(archive->fileOffsets);
+        free(archive->filesizes);
+        archive->gfilelist = NULL;
+        archive->fileOffsets = NULL;
+        archive->filesizes = NULL;
+        close(archive->fileDescriptor);
+        archive->fileDescriptor = -1;
+        SDL_UnlockDisplay();
+        memset(archive, 0, sizeof(grpArchive_t));
+        return (-1);
+    }
     
     // Load the full index 16 bytes per file (12bytes for name + 4 bytes for the size).
     read(archive->fileDescriptor,archive->gfilelist, archive->numFiles * 16);
@@ -192,11 +218,16 @@ void uninitgroupfile(void)
 	int i;
     
 	for( i=0 ; i < grpSet.num ;i++){
+        if (grpSet.archives[i].fileDescriptor >= 0) {
+            close(grpSet.archives[i].fileDescriptor);
+            grpSet.archives[i].fileDescriptor = -1;
+        }
         free(grpSet.archives[i].gfilelist);
         free(grpSet.archives[i].fileOffsets);
         free(grpSet.archives[i].filesizes);
         memset(&grpSet.archives[i], 0, sizeof(grpArchive_t));
     }
+    grpSet.num = 0;
     
 }
 

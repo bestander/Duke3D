@@ -31,6 +31,7 @@
 #include "tiles.h"
 
 #include "esp_attr.h"
+#include "cache.h"
 #include "esp_heap_caps.h"
 
 int32_t stereowidth = 23040, stereopixelwidth = 28, ostereopixelwidth = -1;
@@ -718,8 +719,25 @@ static void ceilscan (int32_t x1, int32_t x2, int32_t sectnum)
 
     sec = &sector[sectnum];
     
-    if (palookup[sec->ceilingpal] != globalpalwritten)
-        globalpalwritten = palookup[sec->ceilingpal];
+    // FIX_00088: a map may use a palette index whose palookup[] was never built
+    // (only the pals in lookup.dat get makepalookup()'d). Falling through with a
+    // NULL globalpalwritten crashes hlineasm4 (LoadProhibited). Fall back to pal 0.
+    // NOTE: assign unconditionally — the old `if (palookup[ceilingpal] != globalpalwritten)`
+    // guard had a hole: when globalpalwritten was *already* NULL and palookup[ceilingpal]
+    // is also NULL (NULL!=NULL is false) the fix was skipped, leaving globalpalwritten NULL.
+    globalpalwritten = palookup[sec->ceilingpal] ? palookup[sec->ceilingpal] : palookup[0];
+    // Hard backstop: if even pal 0 is missing (e.g. loadpalette() failed/early-returned on a
+    // cooperative reload, leaving palookup[0]==NULL) skip the surface instead of dereferencing
+    // a NULL base in hlineasm4 -> LoadProhibited reboot.
+    if (!globalpalwritten) {
+        static uint8_t warned_nopal = 0;
+        if (!warned_nopal) {
+            warned_nopal = 1;
+            printf("WARN ceilscan: no palette table (palookup[%d]==NULL, palookup[0]==%p) — skipping\n",
+                   (int)sec->ceilingpal, (void *)palookup[0]);
+        }
+        return;
+    }
 
     
     globalzd = sec->ceilingz-globalposz;
@@ -954,8 +972,12 @@ static void florscan (int32_t x1, int32_t x2, int32_t sectnum)
     sec = &sector[sectnum];
     
     //Retrieve the floor palette.
-    if (palookup[sec->floorpal] != globalpalwritten)
-        globalpalwritten = palookup[sec->floorpal];
+    // FIX_00088: guard against an unbuilt palookup[] (NULL) -> hlineasm4 crash.
+    // Unconditional assign (see ceilscan): the != guard skipped the fix when both
+    // globalpalwritten and palookup[floorpal] were NULL, leaving it NULL.
+    globalpalwritten = palookup[sec->floorpal] ? palookup[sec->floorpal] : palookup[0];
+    if (!globalpalwritten)
+        return;
 
     globalzd = globalposz-sec->floorz;
     
@@ -1597,6 +1619,7 @@ IRAM_ATTR static void parascan(int32_t dax1, int32_t dax2, int32_t sectnum,uint8
     if (dastat == 0)
     {
         globalpal = sec->ceilingpal;
+        if (!palookup[globalpal]) globalpal = 0; // FIX_00088: unbuilt palookup
         globalpicnum = sec->ceilingpicnum;
         globalshade = (int32_t)sec->ceilingshade;
         globalxpanning = (int32_t)sec->ceilingxpanning;
@@ -1607,6 +1630,7 @@ IRAM_ATTR static void parascan(int32_t dax1, int32_t dax2, int32_t sectnum,uint8
     else
     {
         globalpal = sec->floorpal;
+        if (!palookup[globalpal]) globalpal = 0; // FIX_00088: unbuilt palookup
         globalpicnum = sec->floorpicnum;
         globalshade = (int32_t)sec->floorshade;
         globalxpanning = (int32_t)sec->floorxpanning;
@@ -1745,6 +1769,7 @@ static void grouscan (int32_t dax1, int32_t dax2, int32_t sectnum, uint8_t  dast
         globalpicnum = sec->ceilingpicnum;
         globalshade = sec->ceilingshade;
         globalpal = sec->ceilingpal;
+        if (!palookup[globalpal]) globalpal = 0; // FIX_00088: unbuilt palookup
         daslope = sec->ceilingheinum;
         daz = sec->ceilingz;
     }
@@ -1756,6 +1781,7 @@ static void grouscan (int32_t dax1, int32_t dax2, int32_t sectnum, uint8_t  dast
         globalpicnum = sec->floorpicnum;
         globalshade = sec->floorshade;
         globalpal = sec->floorpal;
+        if (!palookup[globalpal]) globalpal = 0; // FIX_00088: unbuilt palookup
         daslope = sec->floorheinum;
         daz = sec->floorz;
     }
@@ -2331,6 +2357,7 @@ static void drawalls(int32_t bunch)
                     globvis = globalvisibility;
                     if (sec->visibility != 0) globvis = mulscale4(globvis,(int32_t)((uint8_t )(sec->visibility+16)));
                     globalpal = (int32_t)wal->pal;
+                    if (!palookup[globalpal]) globalpal = 0; // FIX_00088: unbuilt palookup
                     globalyscale = (wal->yrepeat<<(globalshiftval-19));
                     if ((globalorientation&4) == 0)
                         globalzd = (((globalposz-nextsec->ceilingz)*globalyscale)<<8);
@@ -2415,6 +2442,7 @@ static void drawalls(int32_t bunch)
                         
                         globalshade = (int32_t)wal->shade;
                         globalpal = (int32_t)wal->pal;
+                        if (!palookup[globalpal]) globalpal = 0; // FIX_00088: unbuilt palookup
                         wallnum = pvWalls[z].worldWallId;
                         wal = &wall[wallnum];
                     }
@@ -2432,6 +2460,7 @@ static void drawalls(int32_t bunch)
                             globalpicnum += animateoffs(globalpicnum);
                         globalshade = (int32_t)wal->shade;
                         globalpal = (int32_t)wal->pal;
+                        if (!palookup[globalpal]) globalpal = 0; // FIX_00088: unbuilt palookup
                     }
                     globvis = globalvisibility;
                     if (sec->visibility != 0)
@@ -2541,6 +2570,7 @@ static void drawalls(int32_t bunch)
                 globvis = mulscale4(globvis,(int32_t)((uint8_t )(sec->visibility+16)));
             
             globalpal = (int32_t)wal->pal;
+            if (!palookup[globalpal]) globalpal = 0; // FIX_00088: unbuilt palookup
             globalshiftval = (picsiz[globalpicnum]>>4);
             if (pow2long[globalshiftval] != tiles[globalpicnum].dim.height)
                 globalshiftval++;
@@ -3683,12 +3713,32 @@ void initengine(void)
 
 void uninitengine(void)
 {
-    /* transluc points to static PSRAM storage — do not free it. */
-    transluc = NULL;
+    int32_t i;
+
+    /* transluc points to static PSRAM storage (draw.c transluc_storage) — neither free
+     * nor NULL it. Nulling discards the only pointer to the static buffer, so the next
+     * initengine()/loadpalette() would hit `if (transluc == NULL) allocache(...)` before
+     * initcache() runs (cachesize==0) → "BUFFER TOO BIG TO FIT IN CACHE" abort on reload. */
+
+    /* palookup[] shade tables are kkmalloc'd per palette in loadpalette()/makepalookup()
+     * (numpalookups<<8 bytes each). Without freeing them here, every cooperative reload
+     * (Start→E1L1, quit→demo) leaks ~8KB per palette — PSRAM dropped 358KB→158KB across a
+     * single demo→play reload. Free only the heap copies; entries that fell back to
+     * allocache live inside the `pic` cache buffer and are released by kkfree(pic) below
+     * (the bounds test against [pic, pic+cachesize) skips those to avoid a double free). */
+    for (i = 0; i < MAXPALOOKUPS; i++) {
+        uint8_t *p = palookup[i];
+        if (p != NULL && (pic == NULL || p < pic || p >= pic + cachesize)) {
+            kkfree(p);
+        }
+        palookup[i] = NULL;
+    }
+
     if (pic != NULL) {
         kkfree(pic);
         pic = NULL;
     }
+    resetcache();
     if (artfil != -1) kclose(artfil);
     _uninitengine(); /* video driver specific. */
 }
@@ -3959,6 +4009,13 @@ IRAM_ATTR static void  dorotatesprite (int32_t sx, int32_t sy, int32_t z, short 
     setgotpic(picnum);
     bufplc = waloff[picnum];
 
+    // If the tile couldn't be made available (waloff==0, e.g. a font glyph not
+    // mapped from flash/GRP), the vline asm would read texture/palette data
+    // through a null base -> LoadProhibited. Skip drawing this sprite instead.
+    if (!bufplc) return;
+
+    // FIX_00088: dapalnum may index an unbuilt palookup[] (NULL) -> crash.
+    if (!palookup[dapalnum]) dapalnum = 0;
     palookupoffs = palookup[dapalnum] + (getpalookup(0L,(int32_t)dashade)<<8);
 
     i = divscale32(1L,z);
@@ -4692,6 +4749,7 @@ static void drawmaskwall(short damaskwallcnt)
     if (sec->visibility != 0)
         globvis = mulscale4(globvis,(int32_t)((uint8_t )(sec->visibility+16)));
     globalpal = (int32_t)wal->pal;
+    if (!palookup[globalpal]) globalpal = 0; // FIX_00088: unbuilt palookup
     globalshiftval = (picsiz[globalpicnum]>>4);
     if (pow2long[globalshiftval] != tiles[globalpicnum].dim.height)
         globalshiftval++;
@@ -8742,11 +8800,12 @@ void drawmapview(int32_t dax, int32_t day, int32_t zoome, short ang)
             globalorientation = (int32_t)sec->floorstat;
             if ((globalorientation&1) != 0) continue;
 
-            if (palookup[sec->floorpal] != globalpalwritten)
-            {
-                globalpalwritten = palookup[sec->floorpal];
-               
-            }
+            // FIX_00088: guard against an unbuilt palookup[] (NULL). Unconditional
+            // assign + skip-if-still-NULL (see ceilscan) — the != guard could leave
+            // globalpalwritten NULL when both it and palookup[floorpal] were NULL.
+            globalpalwritten = palookup[sec->floorpal] ? palookup[sec->floorpal] : palookup[0];
+            if (!globalpalwritten)
+                continue;
             globalpicnum = sec->floorpicnum;
             if ((uint32_t)globalpicnum >= (uint32_t)MAXTILES) globalpicnum = 0;
             setgotpic(globalpicnum);
@@ -8949,7 +9008,8 @@ void drawmapview(int32_t dax, int32_t day, int32_t zoome, short ang)
             else
                 globalshade = ((int32_t)sector[spr->sectnum].floorshade);
             globalshade = max(min(globalshade+spr->shade+6,numpalookups-1),0);
-            asm3 = (int32_t) FP_OFF(palookup[spr->pal]+(globalshade<<8));
+            // FIX_00088: spr->pal may index an unbuilt palookup[] (NULL) -> crash.
+            asm3 = (int32_t) FP_OFF((palookup[spr->pal] ? palookup[spr->pal] : palookup[0])+(globalshade<<8));
             globvis = globalhisibility;
             if (sec->visibility != 0) globvis = mulscale4(globvis,(int32_t)((uint8_t )(sec->visibility+16)));
             globalpolytype = ((spr->cstat&2)>>1)+1;

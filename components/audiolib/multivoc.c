@@ -3375,6 +3375,13 @@ printf("MV_Init card: %d, rate: %d, voices: %d, channels: %d, bits: %d\n", sound
    status = USRHOOKS_GetMem( ( void ** )&ptr, MV_TotalMemory );
    if ( status != USRHOOKS_Ok )
       {
+#if defined(ESP_PLATFORM)
+      ESP_LOGE(MV_STREAM_TAG,
+               "MV_Init: voice array OOM (%u B) int_free=%u spiram_free=%u",
+               (unsigned)MV_TotalMemory,
+               (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+               (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+#endif
       MV_UnlockMemory();
       MV_SetErrorCode( MV_NoMem );
       return( MV_Error );
