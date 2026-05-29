@@ -1893,6 +1893,11 @@ static void grouscan (int32_t dax1, int32_t dax2, int32_t sectnum, uint8_t  dast
     if (sec->visibility != 0) globvis = mulscale4(globvis,(int32_t)((uint8_t )(sec->visibility+16)));
     globvis = mulscale13(globvis,daz);
     globvis = mulscale16(globvis,xdimscale);
+    // FIX_00088 backstop: globalpal already falls back to 0 above, but if even palookup[0] is
+    // missing (no palette table at all) slopevlin would read through a NULL base (j==0) ->
+    // LoadProhibited. Skip the sloped surface instead of crashing.
+    if (!palookup[globalpal])
+        return;
     j =(int32_t) FP_OFF(palookup[globalpal]);
 
     setupslopevlin(((int32_t)(picsiz[globalpicnum]&15))+(((int32_t)(picsiz[globalpicnum]>>4))<<8),waloff[globalpicnum],-ylookup[1]);
@@ -2824,6 +2829,16 @@ void drawrooms(int32_t daposx, int32_t daposy, int32_t daposz,short daang, int32
 	int32_t cz, fz;
     short *shortptr1, *shortptr2;
 
+	/* Safety net: the root cause (setviewcnt overflow zeroing palookup[0]) is fixed in
+	 * initengine()/setviewtotile(), but if palookup[0] is ever NULL here, every surface
+	 * renderer would dereference NULL+shade*256 -> LoadProhibited. Skip the frame instead of
+	 * crashing. Kept render-safe (no file I/O / loadpalette in the draw path). */
+	if (palookup[0] == NULL)
+	{
+		printf("WARN drawrooms: palookup[0]==NULL — skipping frame\n");
+		return;
+	}
+
 	// When visualizing the rendering process, part of the screen
 	// are not updated: In order to avoid the "ghost effect", we
 	// clear the framebuffer to black.
@@ -3618,7 +3633,13 @@ static void loadpalette(void)
     //CODE EXPLORATION
     printf("Num palettes lookup: %d.\n",numpalookups);
     
-    if ((palookup[0] = (uint8_t  *)kkmalloc(numpalookups<<8)) == NULL)
+    /* Allocate the base shade table from PSRAM. kkmalloc()==malloc() draws from the tiny
+     * internal heap (~50KB, mostly used) and fails after a couple of cooperative reloads — it
+     * then falls back to allocache() (the evictable tile cache). On a memory-pressured reload
+     * palookup[0] ended up NULL/evicted by render time -> ceilscan/grouscan NULL-palette crashes
+     * (E1L5/E1L6). PSRAM has hundreds of KB free and these tables are never cache-evicted. */
+    palookup[0] = (uint8_t  *)heap_caps_malloc(numpalookups<<8, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (palookup[0] == NULL)
         allocache(&palookup[0],numpalookups<<8,&permanentlock);
 
     /* transluc is now a static 65KB PSRAM array (draw.c: transluc_storage),
@@ -3646,7 +3667,6 @@ static void loadpalette(void)
     initfastcolorlookup(30L,59L,11L);
 
     paletteloaded = 1;
-
 }
 
 
@@ -3679,6 +3699,15 @@ void initengine(void)
 
     searchit = 0;
     searchstat = -1;
+
+    /* setviewcnt is the depth of the drawrooms-to-tile backup stack (bak*[4] arrays).
+     * It is a plain global that survives cooperative reloads (Start button longjmp). If a
+     * run is torn down between setviewtotile() and its setviewback() (e.g. a security-camera
+     * /screencapt frame was in flight), the push is never popped and setviewcnt leaks +1 per
+     * reload. Once it reaches 4 the next bak*[setviewcnt] write runs off the size-4 arrays
+     * into adjacent .bss — it lands on palookup[0], zeroing the base shade table and causing
+     * the NULL-palette render crash (wallscan/ceilscan). Reset it for every engine run. */
+    setviewcnt = 0;
 
     for(i=0; i<MAXPALOOKUPS; i++)
         palookup[i] = NULL;
@@ -8275,8 +8304,10 @@ void makepalookup(int32_t palnum, uint8_t  *remapbuf, int8_t r,
 
     if (palookup[palnum] == NULL)
     {
-        /* Allocate palookup buffer */
-        if ((palookup[palnum] = (uint8_t  *)kkmalloc(numpalookups<<8)) == NULL)
+        /* Allocate palookup buffer from PSRAM (see loadpalette) — avoids the internal-heap OOM
+         * falling into the evictable cache, which left palookup[] NULL at render after reloads. */
+        palookup[palnum] = (uint8_t  *)heap_caps_malloc(numpalookups<<8, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (palookup[palnum] == NULL)
             allocache((int32_t *)&palookup[palnum],numpalookups<<8,&permanentlock);
     }
 

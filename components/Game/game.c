@@ -3242,8 +3242,13 @@ IRAM_ATTR void displayrooms(short snum,int32_t smoothratio)
     struct player_struct *p;
     int32_t tposx,tposy,i;
     short tang;
+    int32_t entry_setviewcnt;
 
     p = &ps[snum];
+
+    /* Snapshot the drawrooms-to-tile backup-stack depth so we can guarantee it returns to
+     * this value before we leave the frame (see self-healing drain at the end). */
+    entry_setviewcnt = setviewcnt;
 
     if(pub > 0)
     {
@@ -3295,7 +3300,10 @@ IRAM_ATTR void displayrooms(short snum,int32_t smoothratio)
 			//printf("2: %d %d\n", oyrepeat,yxaspect);
         }
 
-        if(screencapt)
+        /* Gate the push on the exact same condition as the pop below (screencapt == 1). The
+         * original asymmetry — push on any truthy screencapt, pop only on == 1 — leaks one
+         * setviewcnt push per frame if screencapt ever holds a truthy value other than 1. */
+        if(screencapt == 1)
         {
             tiles[MAXTILES-1].lock = 254;
             if (waloff[MAXTILES-1] == NULL)
@@ -3412,6 +3420,15 @@ IRAM_ATTR void displayrooms(short snum,int32_t smoothratio)
         }
         // screen_tilting draw removed: paired with alloc above
     }
+
+    /* Self-healing backup-stack balance: setviewcnt must return to its entry depth every
+     * frame. Any push (setviewtotile) left unmatched by setviewback — a corrupted screencapt,
+     * a security-camera/mirror frame, or a cooperative reload caught mid-render — would
+     * otherwise leak setviewcnt upward until it overruns the size-4 bak*[] arrays and zeroes
+     * palookup[0] (NULL-palette render crash). Drain it back here so the leak can never
+     * accumulate. In the normal balanced case this is a no-op. */
+    while (setviewcnt > entry_setviewcnt)
+        setviewback();
 
     restoreinterpolations();
 

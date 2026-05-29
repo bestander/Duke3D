@@ -216,19 +216,30 @@ int32_t initgroupfile(const char  *filename)
 void uninitgroupfile(void)
 {
 	int i;
-    
+
+	/* DIAGNOSTIC: cooperative reload (Start button) sometimes hangs between "Shutdown() done"
+	 * and "uninitgroupfile() done". This is a trivial close()/free() loop, so a hang here means
+	 * a blocked heap/VFS lock or a corrupt grpSet. Trace each step to localize it. */
+	printf("uninitgroupfile: start num=%d\n", grpSet.num);
 	for( i=0 ; i < grpSet.num ;i++){
+        printf("uninitgroupfile: arch[%d] fd=%d gfl=%p off=%p siz=%p\n", i,
+               grpSet.archives[i].fileDescriptor,
+               (void*)grpSet.archives[i].gfilelist,
+               (void*)grpSet.archives[i].fileOffsets,
+               (void*)grpSet.archives[i].filesizes);
         if (grpSet.archives[i].fileDescriptor >= 0) {
             close(grpSet.archives[i].fileDescriptor);
             grpSet.archives[i].fileDescriptor = -1;
         }
+        printf("uninitgroupfile: arch[%d] closed, freeing\n", i);
         free(grpSet.archives[i].gfilelist);
         free(grpSet.archives[i].fileOffsets);
         free(grpSet.archives[i].filesizes);
+        printf("uninitgroupfile: arch[%d] freed\n", i);
         memset(&grpSet.archives[i], 0, sizeof(grpArchive_t));
     }
     grpSet.num = 0;
-    
+    printf("uninitgroupfile: done\n");
 }
 
 void crc32_table_gen(unsigned int* crc32_table) /* build CRC32 table */

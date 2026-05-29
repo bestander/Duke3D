@@ -48,7 +48,28 @@ EXT_RAM_ATTR uint8_t  gotpic[(MAXTILES+7)>>3];
 void setviewtotile(short tilenume, int32_t tileWidth, int32_t tileHeight)
 {
     int32_t i, j;
-    
+
+    /* Defense in depth: the bak*[] backup arrays have 4 slots, so setviewcnt must stay in
+     * [0,3]. If a push/pop imbalance ever drives it out of range, writing bak*[setviewcnt]
+     * corrupts adjacent .bss (it clobbered palookup[0] -> NULL-palette render crash). Refuse
+     * to push past the array bound instead of corrupting memory. With setviewcnt reset per
+     * engine run (initengine) this should never trigger; it is a hard safety net. */
+    if (setviewcnt < 0) setviewcnt = 0;
+    if (setviewcnt >= 4)
+    {
+        /* Rate-limited: displayrooms() now drains setviewcnt back to its entry depth every
+         * frame, so this should never trigger. If it ever does, warn once instead of
+         * flooding the serial log (which previously starved the task with printf spam). */
+        static int warned = 0;
+        if (!warned)
+        {
+            warned = 1;
+            printf("WARN setviewtotile: backup stack overflow (setviewcnt=%d) — ignoring push\n",
+                   (int)setviewcnt);
+        }
+        return;
+    }
+
     /* DRAWROOMS TO TILE BACKUP&SET CODE */
     tiles[tilenume].dim.width = tileWidth;
     tiles[tilenume].dim.height = tileHeight;
