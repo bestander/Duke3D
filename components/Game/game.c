@@ -8764,27 +8764,29 @@ void opendemowrite(void)
     int32_t dummylong = 0;
     uint8_t  ver;
     short i;
-	char  fullpathdemofilename[16];
+    char fullpathdemofilename[64];
 
     if(ud.recstat == 2) kclose(recfilep);
 
     ver = BYTEVERSION;
 
-	// Are we loading a TC?
-	if(getGameDir()[0] != '\0'){
-		// Yes
-		sprintf(fullpathdemofilename, "%s\\%s", getGameDir(), d);
-	}
-	else{
-		// No 
-		sprintf(fullpathdemofilename, "%s", d);
-	}
+    if (dukesp_demo_write_path(fullpathdemofilename, sizeof(fullpathdemofilename))) {
+        /* ESP live-session recorder supplied the rotated SD-card path. */
+    } else if (getGameDir()[0] != '\0') {
+        snprintf(fullpathdemofilename, sizeof(fullpathdemofilename), "%s/%s", getGameDir(), d);
+    } else {
+        snprintf(fullpathdemofilename, sizeof(fullpathdemofilename), "%s", d);
+    }
     SDL_LockDisplay();
 // CTW - MODIFICATION
 //  if ((frecfilep = fopen(d,"wb")) == -1) return;
     // Must release the display lock before bailing — an early return while
     // holding it self-deadlocks the next SDL_LockDisplay() for 60s (watchdog).
-    if ((frecfilep = fopen(fullpathdemofilename,"wb")) == NULL) { SDL_UnlockDisplay(); return; }
+    if ((frecfilep = fopen(fullpathdemofilename,"wb")) == NULL) {
+        ud.recstat = ud.m_recstat = 0;
+        SDL_UnlockDisplay();
+        return;
+    }
 // CTW END - MODIFICATION
     fwrite(&dummylong,4,1,frecfilep);
     fwrite(&ver,sizeof(uint8_t ),1,frecfilep);

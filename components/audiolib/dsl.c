@@ -41,6 +41,7 @@ extern volatile int MV_MixPage;
 /* Declared extern to avoid pulling C++ esp32_hal.h into this C file.
  * platform_audio_write is defined in esp32_hal.cpp as extern "C".       */
 extern void platform_audio_write(const int16_t *pcm, int n);
+extern void platform_audio_silence(void);
 
 static const char *TAG = "dsl";
 
@@ -188,6 +189,9 @@ int DSL_BeginBufferedPlayback(char *BufferStart, int BufferSize, int NumDivision
 void DSL_StopPlayback(void)
 {
     _mixer_initialized = 0;
+    /* Let the pump finish its current period without scheduling new mixes. */
+    vTaskDelay(pdMS_TO_TICKS(30));
+    platform_audio_silence();
     if (g_audio_task) {
         vTaskDelete(g_audio_task);
         g_audio_task = NULL;
