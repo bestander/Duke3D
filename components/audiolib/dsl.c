@@ -57,6 +57,7 @@ static int   _SampleRate;
 static int   _mixer_initialized;
 
 static TaskHandle_t g_audio_task  = NULL;
+static volatile int g_audio_stop   = 0;
 
 /* ------------------------------------------------------------------ */
 
@@ -112,6 +113,11 @@ static void audio_pump_task(void *arg)
     TickType_t last_wake = xTaskGetTickCount();
 
     for (;;) {
+        if (g_audio_stop) {
+            platform_audio_silence();
+            g_audio_task = NULL;
+            vTaskDelete(NULL);
+        }
         vTaskDelayUntil(&last_wake, period_ticks);
 
         if (!_mixer_initialized || !_CallBackFunc || !_BufferStart)
@@ -170,13 +176,14 @@ int DSL_BeginBufferedPlayback(char *BufferStart, int BufferSize, int NumDivision
     ESP_LOGD(TAG, "DSL_BeginBufferedPlayback rate=%u mode=0x%x pages=%d buf=%d B",
              SampleRate, MixMode, NumDivisions, _BufferSize);
 
-    /* Pin to Core 0 — game task runs on Core 1 at priority 5; keeping audio on
-     * Core 0 means audio gets its own CPU with no priority competition.
-     * Stack allocated from PSRAM to avoid exhausting internal RAM (BT host
-     * threads + WiFi + Hub75 DMA already consume most internal RAM).         */
+    /* Pin to Core 0 — game task runs on Core 1 at priority 5.
+     * Stack must be internal RAM: this task calls SD/SPI, which disables the
+     * cache. A PSRAM stack in that window faults (LoadProhibited) and leaves
+     * I2S DMA running into the amp. */
+    g_audio_stop = 0;
     if (xTaskCreatePinnedToCoreWithCaps(audio_pump_task, "duke_audio",
-                                        4096, NULL, 4, &g_audio_task, 0,
-                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+                                        8192, NULL, 4, &g_audio_task, 0,
+                                        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) != pdPASS) {
         ESP_LOGE(TAG, "failed to create audio pump task");
         DSL_SetErrorCode(DSL_MixerInitFailure);
         return DSL_Error;
@@ -189,13 +196,17 @@ int DSL_BeginBufferedPlayback(char *BufferStart, int BufferSize, int NumDivision
 void DSL_StopPlayback(void)
 {
     _mixer_initialized = 0;
-    /* Let the pump finish its current period without scheduling new mixes. */
-    vTaskDelay(pdMS_TO_TICKS(30));
-    platform_audio_silence();
+    /* The pump exits itself after flushing silence, so we do not vTaskDelete
+     * it while it is inside i2s_write (that races the driver and leaves DMA on). */
+    g_audio_stop = 1;
+    for (int i = 0; i < 40 && g_audio_task != NULL; i++)
+        vTaskDelay(pdMS_TO_TICKS(10));
     if (g_audio_task) {
         vTaskDelete(g_audio_task);
         g_audio_task = NULL;
+        platform_audio_silence();
     }
+    g_audio_stop = 0;
 }
 
 unsigned DSL_GetPlaybackRate(void) { return (unsigned)_SampleRate; }
