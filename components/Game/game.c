@@ -106,7 +106,7 @@ char  firstdemofile[80] = { '\0' };
 
 void newint24( int errval, int ax, int bp, int si );
 
-int recfilep,totalreccnt;
+int recfilep = -1, totalreccnt;
 uint8_t  debug_on = 0,actor_tog = 0,memorycheckoveride=0;
 uint8_t *rtsptr;
 
@@ -8532,6 +8532,10 @@ int main(int argc,char  **argv)
         nomorelogohack = 1;
         goto MAIN_LOOP_RESTART;
     }
+    /* /dFILE was unplayable (bad version, short file). Leave so the kiosk
+     * can pick another demo instead of sitting on the menu. */
+    if (ud.warp_on == 0 && firstdemofile[0] != 0)
+        return 0;
 
     ud.warp_on = 0;
 
@@ -8679,6 +8683,7 @@ uint8_t  opendemoread(uint8_t  which_demo) // 0 = mine
 			printf("%s is a demo version %d. We want v. %d, %d, %d, or %d (1.5 Atomic versions)\n",
 					fname, (int) ver, BYTEVERSION_116, BYTEVERSION_117, BYTEVERSION_118, BYTEVERSION);
 			kclose(recfilep);
+			recfilep = -1;
 			return 0;
 		}
 	}
@@ -8689,6 +8694,7 @@ uint8_t  opendemoread(uint8_t  which_demo) // 0 = mine
 			printf("%s is a demo version %d. We want v. %d, %d, %d or %d (1.3/1.3d versions)\n",
 					fname, (int) ver, BYTEVERSION_27, BYTEVERSION_28, BYTEVERSION_29, BYTEVERSION);
 			kclose(recfilep);
+			recfilep = -1;
 			return 0;
 		}
 	}
@@ -8710,6 +8716,7 @@ uint8_t  opendemoread(uint8_t  which_demo) // 0 = mine
 
 				}
 				kclose(recfilep);
+			recfilep = -1;
 				return 0;
 			}
 
@@ -8766,7 +8773,10 @@ void opendemowrite(void)
     short i;
     char fullpathdemofilename[64];
 
-    if(ud.recstat == 2) kclose(recfilep);
+    if (recfilep >= 0) {
+        kclose(recfilep);
+        recfilep = -1;
+    }
 
     ver = BYTEVERSION;
 
@@ -8842,16 +8852,18 @@ void closedemowrite(void)
     if (ud.recstat == 1)
     {
         recording_finalized = 1;
-        if (ud.reccnt > 0)
+        if (ud.reccnt > 0 && ud.multimode > 0 && frecfilep != NULL)
         {
             dfwrite(recsync,sizeof(input)*ud.multimode,ud.reccnt/ud.multimode,frecfilep);
 
-            fseek(frecfilep,SEEK_SET,0L);
+            fseek(frecfilep, 0L, SEEK_SET);
             fwrite(&totalreccnt,sizeof(int32_t),1,frecfilep);
-            ud.recstat = ud.m_recstat = 0;
         }
-        fclose(frecfilep);
-        frecfilep = NULL;
+        if (frecfilep != NULL) {
+            fclose(frecfilep);
+            frecfilep = NULL;
+        }
+        ud.recstat = ud.m_recstat = 0;
     }
     SDL_UnlockDisplay();
 
@@ -8901,6 +8913,10 @@ int32_t playback(void)
 
     if(foundemo == 0)
     {
+        /* Kiosk passed /dFILE. A missing or corrupt demo must not fall into
+         * menus() — that loop never returns (foundemo == 0). */
+        if (firstdemofile[0] != 0)
+            return 0;
 
         if(which_demo > 1)
         {
@@ -9047,13 +9063,16 @@ int32_t playback(void)
 
         if( ps[myconnectindex].gm==MODE_END || ps[myconnectindex].gm==MODE_GAME )
         {
-            if(foundemo)
+            if(foundemo) {
                 kclose(recfilep);
+                recfilep = -1;
+            }
             ud.playing_demo_rev = 0;
 			return 0;
         }
     }
     kclose(recfilep);
+			recfilep = -1;
 	ud.playing_demo_rev = 0;
     if(ps[myconnectindex].gm&MODE_MENU)
 	{

@@ -129,8 +129,11 @@ static void audio_pump_task(void *arg)
          * mixer consumes the active half (see multivoc.c).
          * Run several passes: many streaming voices may each need a half
          * filled; one walk only schedules one chunk per voice per call. */
-        for (int pf = 0; pf < 5; pf++)
+        for (int pf = 0; pf < 5; pf++) {
+            if (g_audio_stop)
+                break;
             MV_PrefetchStreams();
+        }
 
         /* Critical section: prevents game task from preempting us mid-
          * iteration of the voice linked list (same-core, nested-safe).  */
@@ -141,8 +144,11 @@ static void audio_pump_task(void *arg)
         portEXIT_CRITICAL(&g_audio_mux);
 
         /* Fill stream halves that became empty during the mix before next period. */
-        for (int pf = 0; pf < 4; pf++)
+        for (int pf = 0; pf < 4; pf++) {
+            if (g_audio_stop)
+                break;
             MV_PrefetchStreams();
+        }
 
         /* Push the freshly-mixed page (same index MV_ServiceVoc wrote). */
         const int16_t *buf =
@@ -158,7 +164,7 @@ int DSL_BeginBufferedPlayback(char *BufferStart, int BufferSize, int NumDivision
                                unsigned SampleRate, int MixMode,
                                void (*CallBackFunc)(void))
 {
-    if (_mixer_initialized) {
+    if (_mixer_initialized || g_audio_task != NULL) {
         DSL_SetErrorCode(DSL_MixerActive);
         return DSL_Error;
     }
@@ -196,15 +202,16 @@ int DSL_BeginBufferedPlayback(char *BufferStart, int BufferSize, int NumDivision
 void DSL_StopPlayback(void)
 {
     _mixer_initialized = 0;
-    /* The pump exits itself after flushing silence, so we do not vTaskDelete
-     * it while it is inside i2s_write (that races the driver and leaves DMA on). */
+    /* The pump flushes silence itself, then deletes itself. Writing I2S from
+     * this task while the pump is inside i2s_write deadlocks the legacy driver
+     * and trips the interrupt watchdog (Start → SoundShutdown). */
     g_audio_stop = 1;
-    for (int i = 0; i < 40 && g_audio_task != NULL; i++)
+    for (int i = 0; i < 200 && g_audio_task != NULL; i++)
         vTaskDelay(pdMS_TO_TICKS(10));
     if (g_audio_task) {
-        vTaskDelete(g_audio_task);
-        g_audio_task = NULL;
-        platform_audio_silence();
+        /* Do not ESP_LOG here. SoundShutdown already holds the newlib stdio
+         * lock; a nested log aborts in lock_acquire_generic and reboots. */
+        return;
     }
     g_audio_stop = 0;
 }
