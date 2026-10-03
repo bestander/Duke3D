@@ -1,3 +1,4 @@
+#include <string.h>
 #include "SDL_video.h"
 #include <esp_timer.h>
 #include "esp_attr.h"
@@ -37,7 +38,13 @@ SDL_VideoInfo *SDL_GetVideoInfo(void)
 
 char *SDL_VideoDriverName(char *namebuf, int maxlen)
 {
-    return "Gadget Workbench - Awesome SPI TFT Driver";
+    static const char name[] = "Gadget Workbench - Awesome SPI TFT Driver";
+    if (namebuf && maxlen > 0) {
+        strncpy(namebuf, name, (size_t)maxlen - 1);
+        namebuf[maxlen - 1] = '\0';
+        return namebuf;
+    }
+    return (char *)name;
 }
 
 

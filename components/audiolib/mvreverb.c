@@ -1,5 +1,6 @@
 #include "multivoc.h"
 #include "_multivc.h"
+#include "interrup.h"
 #include "esp_heap_caps.h"
 
 extern double *MV_FooBuffer;
@@ -22,6 +23,20 @@ static	double IIR_ALPHA, ACC_COEF_A, ACC_COEF_B, ACC_COEF_C, ACC_COEF_D, IIR_COE
 		IN_COEF_L, IN_COEF_R;
 
 static  double iRVBLeft, iRVBRight;
+
+volatile uint32_t MV_DownmixClipSamples;
+volatile uint32_t MV_DownmixBadSamples;
+volatile uint32_t MV_ReverbClampSamples;
+
+/* Delay-line values are normalized (1.0 = full scale). The feedback loop has
+ * no inherent bound, so an unclamped line can run away into full-scale noise. */
+static inline double clamp_rvb(double v)
+{
+	if (v != v) { MV_ReverbClampSamples++; return 0.0; }
+	if (v > 1.0) { MV_ReverbClampSamples++; return 1.0; }
+	if (v < -1.0) { MV_ReverbClampSamples++; return -1.0; }
+	return v;
+}
 
 static int cnv_offset(int src)
 {
@@ -139,7 +154,7 @@ void s_buffer(int iOff,double iVal, double *ptr)                // set_buffer co
 	{
 		iOff=correctDelay-(0-iOff);
 	}
-	*(ptr+iOff)=iVal;
+	*(ptr+iOff)=clamp_rvb(iVal);
 }
 
 void s_buffer1(int iOff,double iVal, double *ptr)                // set_buffer (+1 sample) content helper: takes care about wraps and clipping
@@ -160,7 +175,7 @@ void s_buffer1(int iOff,double iVal, double *ptr)                // set_buffer (
 	{
 		iOff=correctDelay-(0-iOff);
 	}
-	*(ptr+iOff)=iVal;
+	*(ptr+iOff)=clamp_rvb(iVal);
 }
 
 double MixREVERBLeft(double INPUT_SAMPLE_L, double INPUT_SAMPLE_R, double *ptr)
@@ -220,10 +235,9 @@ IRAM_ATTR void MV_FPReverb(int volume)
 {
 	int i, count = MV_BufferSize / MV_SampleSize * MV_Channels;
 
-//	sprintf(err, "count: %d, old_delay: %d", count, delay);
-	//EnterCriticalSection(&reverbCS);
-	SDL_mutexP(reverbMutex);
-
+	/* Called from MV_ServiceVoc, which the audio pump runs inside the audio
+	 * portMUX. Blocking on a FreeRTOS mutex there is illegal; the portMUX
+	 * already excludes MV_FPReverbFree. */
 	check_buffer();
 
 	// DAVE
@@ -231,7 +245,6 @@ IRAM_ATTR void MV_FPReverb(int volume)
 	{
 		// get out now!!! No buffer (reverb disabled / OOM). Must NOT printf() here:
 		// this runs in the audio task per buffer and printf() under OOM abort()s.
-		SDL_mutexV(reverbMutex);
 		return;
 	}
 
@@ -260,22 +273,18 @@ IRAM_ATTR void MV_FPReverb(int volume)
 		}
 	}
 
-	//LeaveCriticalSection(&reverbCS);
-	SDL_mutexV(reverbMutex);
 }
 
 void MV_FPReverbFree(void)
 {
-	SDL_mutexP(reverbMutex);
-	//EnterCriticalSection(&reverbCS);
+	double *old;
+	unsigned long flags = DisableInterrupts();
 	delay = 0;
-	if (reverbBuffer)
-	{
-		free(reverbBuffer);
-		reverbBuffer = 0;
-	}
-	//LeaveCriticalSection(&reverbCS);
-	SDL_mutexV(reverbMutex);
+	old = reverbBuffer;
+	reverbBuffer = 0;
+	RestoreInterrupts(flags);
+	if (old)
+		free(old);
 }
 
 void MV_16BitDownmix(char *dest, int count)
@@ -286,9 +295,17 @@ void MV_16BitDownmix(char *dest, int count)
 
 	for (i = 0; i < count; i++)
 	{
-		int out = (int)((MV_FooBuffer[i] * (double)0x8000));
-		if (out < -32768) pdest[i] = -32768;
-		else if (out > 32767) pdest[i] = 32767;
+		double v = MV_FooBuffer[i];
+		/* NaN/inf -> int is undefined and yields arbitrary full-scale spikes. */
+		if (!(v > -4.0 && v < 4.0))
+		{
+			MV_DownmixBadSamples++;
+			pdest[i] = 0;
+			continue;
+		}
+		int out = (int)(v * (double)0x8000);
+		if (out < -32768) { pdest[i] = -32768; MV_DownmixClipSamples++; }
+		else if (out > 32767) { pdest[i] = 32767; MV_DownmixClipSamples++; }
 		else pdest[i] = out;
 	}
 }

@@ -11,7 +11,7 @@ int num_cvar_bindings = 0;
 
 void CVAR_RegisterCvar(const char * varname, const char * varhelp, void* variable, function_t function)
 {
-    if(NULL == function)
+    if(NULL == function || num_cvar_bindings >= MAX_CVARS)
     {
         return;
     }
@@ -43,6 +43,8 @@ cvar_binding* CVAR_GetCvarBinding(unsigned int nBinding)
 // Bind all standard CVars here
 void CVAR_RegisterDefaultCvarBindings(void)
 {
+    /* Runs once per engine start; the ESP kiosk restarts the engine in-process. */
+    num_cvar_bindings = 0;
     CVARDEFS_Init();
 }
 

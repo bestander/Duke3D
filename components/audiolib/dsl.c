@@ -34,6 +34,12 @@
 #include "freertos/idf_additions.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+
+extern volatile uint32_t MV_DownmixClipSamples;
+extern volatile uint32_t MV_DownmixBadSamples;
+extern volatile uint32_t MV_ReverbClampSamples;
+extern int MV_CurrentReverbLevel(void);
 
 /* MV_MixPage is incremented and mixed into by MV_ServiceVoc */
 extern volatile int MV_MixPage;
@@ -58,6 +64,7 @@ static int   _mixer_initialized;
 
 static TaskHandle_t g_audio_task  = NULL;
 static volatile int g_audio_stop   = 0;
+static volatile int g_audio_parked = 0;
 
 /* ------------------------------------------------------------------ */
 
@@ -112,16 +119,56 @@ static void audio_pump_task(void *arg)
 
     TickType_t last_wake = xTaskGetTickCount();
 
+    const int64_t period_us = (int64_t)n_samp_cfg * 1000000 / sr;
+    int64_t prev_cycle_us = 0;
+    int64_t next_stats_us = esp_timer_get_time() + 10000000;
+    uint32_t late_cycles = 0, worst_gap_us = 0;
+    uint32_t last_clip = 0, last_bad = 0, last_rvb = 0, last_underrun = 0;
+
     for (;;) {
         if (g_audio_stop) {
             platform_audio_silence();
-            g_audio_task = NULL;
-            vTaskDelete(NULL);
+            /* Park; DSL_StopPlayback deletes us. A WithCaps task cannot
+             * free its own stack on IDF 5.2, so self-deletion leaks 8 KB of
+             * internal RAM per engine reload. */
+            g_audio_parked = 1;
+            for (;;)
+                vTaskSuspend(NULL);
         }
         vTaskDelayUntil(&last_wake, period_ticks);
 
         if (!_mixer_initialized || !_CallBackFunc || !_BufferStart)
             continue;
+
+        const int64_t now_us = esp_timer_get_time();
+        if (prev_cycle_us) {
+            const uint32_t gap = (uint32_t)(now_us - prev_cycle_us);
+            if (gap > worst_gap_us)
+                worst_gap_us = gap;
+            /* The I2S ring holds ~12 periods; a gap this long means the
+             * producer fell behind and the ring may have drained. */
+            if (gap > (uint32_t)(period_us * 3))
+                late_cycles++;
+        }
+        prev_cycle_us = now_us;
+
+        if (now_us >= next_stats_us) {
+            next_stats_us = now_us + 10000000;
+            const uint32_t clip = MV_DownmixClipSamples, bad = MV_DownmixBadSamples;
+            const uint32_t rvb = MV_ReverbClampSamples, und = MV_StreamUnderrunTotal();
+            if (clip != last_clip || bad != last_bad || rvb != last_rvb ||
+                und != last_underrun || late_cycles) {
+                ESP_LOGW("sound_trace",
+                         "10s: clip=%u bad=%u rvb_clamp=%u stream_underrun=%u "
+                         "late_cycles=%u worst_gap=%ums reverb=%d",
+                         (unsigned)(clip - last_clip), (unsigned)(bad - last_bad),
+                         (unsigned)(rvb - last_rvb), (unsigned)(und - last_underrun),
+                         (unsigned)late_cycles, (unsigned)(worst_gap_us / 1000),
+                         MV_CurrentReverbLevel());
+            }
+            last_clip = clip; last_bad = bad; last_rvb = rvb; last_underrun = und;
+            late_cycles = 0; worst_gap_us = 0;
+        }
 
         /* Pre-fetch SD data for streaming voices BEFORE the critical section.
          * fread may block on SPI DMA; that is fine here since we do not hold
@@ -164,6 +211,20 @@ int DSL_BeginBufferedPlayback(char *BufferStart, int BufferSize, int NumDivision
                                unsigned SampleRate, int MixMode,
                                void (*CallBackFunc)(void))
 {
+    /* MV_Shutdown calls DSL_StopPlayback inside the audio portMUX, where
+     * vTaskDelay cannot wait, so the pump may only park after it returned.
+     * Reap it here, outside any critical section. */
+    if (!_mixer_initialized && g_audio_task != NULL) {
+        g_audio_stop = 1;
+        for (int i = 0; i < 200 && !g_audio_parked; i++)
+            vTaskDelay(pdMS_TO_TICKS(10));
+        if (g_audio_parked) {
+            vTaskDeleteWithCaps(g_audio_task);
+            g_audio_task   = NULL;
+            g_audio_parked = 0;
+            g_audio_stop   = 0;
+        }
+    }
     if (_mixer_initialized || g_audio_task != NULL) {
         DSL_SetErrorCode(DSL_MixerActive);
         return DSL_Error;
@@ -202,18 +263,23 @@ int DSL_BeginBufferedPlayback(char *BufferStart, int BufferSize, int NumDivision
 void DSL_StopPlayback(void)
 {
     _mixer_initialized = 0;
-    /* The pump flushes silence itself, then deletes itself. Writing I2S from
+    /* The pump flushes silence itself, then parks. Writing I2S from
      * this task while the pump is inside i2s_write deadlocks the legacy driver
      * and trips the interrupt watchdog (Start → SoundShutdown). */
+    if (g_audio_task == NULL)
+        return;
     g_audio_stop = 1;
-    for (int i = 0; i < 200 && g_audio_task != NULL; i++)
+    for (int i = 0; i < 200 && !g_audio_parked; i++)
         vTaskDelay(pdMS_TO_TICKS(10));
-    if (g_audio_task) {
+    if (!g_audio_parked) {
         /* Do not ESP_LOG here. SoundShutdown already holds the newlib stdio
          * lock; a nested log aborts in lock_acquire_generic and reboots. */
         return;
     }
-    g_audio_stop = 0;
+    vTaskDeleteWithCaps(g_audio_task);
+    g_audio_task   = NULL;
+    g_audio_parked = 0;
+    g_audio_stop   = 0;
 }
 
 unsigned DSL_GetPlaybackRate(void) { return (unsigned)_SampleRate; }

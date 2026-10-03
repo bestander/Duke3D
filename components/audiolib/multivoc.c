@@ -1067,6 +1067,11 @@ void MV_CloseGRPStream( void )
    g_grp_stream_path[ 0 ] = '\0';
 }
 
+int MV_CurrentReverbLevel( void )
+{
+   return MV_ReverbLevel;
+}
+
 uint32_t MV_StreamUnderrunTotal( void )
 {
    return g_stream_underruns;
@@ -3644,6 +3649,13 @@ int MV_Shutdown
       {
       return( MV_Ok );
       }
+
+#ifndef PLAT_DOS
+   /* Stop the audio pump before taking the portMUX: DSL_StopPlayback's wait
+    * cannot block inside it, and the pump must be parked before the mix
+    * buffers, stream buffers and GRP FILE* below are freed. */
+   DSL_StopPlayback();
+#endif
 
    flags = DisableInterrupts();
 
